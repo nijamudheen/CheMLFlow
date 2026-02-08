@@ -1,20 +1,23 @@
 import torch.nn as nn
+from DLModels.tropicallayer import TropicalLayer
 
-# Define a simple feedforward neural network for regression tasks
 class SimpleRegressionNN(nn.Module):
-    def __init__(self, input_dim, hidden_dim=64):
-        super(SimpleRegressionNN, self).__init__()
-        
-        # Define the network architecture
-        # Input layer → Hidden layer (ReLU) → Hidden layer (ReLU) → Output layer
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),         # First linear layer: input_dim → hidden_dim
-            nn.ReLU(),                                # ReLU activation
-            nn.Linear(hidden_dim, hidden_dim // 2),   # Second linear layer: hidden_dim → hidden_dim // 2
-            nn.ReLU(),                                # ReLU activation
-            nn.Linear(hidden_dim // 2, 1)             # Final linear layer: output → single value
-        )
+    def __init__(self, input_dim, hidden_dim=64, use_tropical=False):
+        super().__init__()
 
-    # Forward pass of the network
+        layers = [
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim // 2),
+            nn.ReLU(),
+        ]
+
+        if use_tropical:
+            layers.append(TropicalLayer(hidden_dim // 2, 1))
+        else:
+            layers.append(nn.Linear(hidden_dim // 2, 1))
+
+        self.net = nn.Sequential(*layers)
+
     def forward(self, x):
-        return self.net(x)                            # Pass input through the sequential network
+        return self.net(x).squeeze(1)

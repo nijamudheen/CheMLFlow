@@ -6,6 +6,8 @@ import sys
 import urllib.request
 from typing import Callable, Dict
 
+HTTP_TIMEOUT_SECONDS = 60
+
 
 def fetch_chembl(output_file: str, source: dict) -> int:
     target_name = source.get("target_name")
@@ -50,7 +52,9 @@ def fetch_http_csv(output_file: str, source: dict) -> int:
         return 1
 
     try:
-        with urllib.request.urlopen(url) as resp, open(output_file, "wb") as out:
+        with urllib.request.urlopen(url, timeout=HTTP_TIMEOUT_SECONDS) as resp, open(
+            output_file, "wb"
+        ) as out:
             out.write(resp.read())
     except Exception as exc:
         logging.error(f"Failed to download CSV from {url}: {exc}")

@@ -1152,7 +1152,11 @@ def _initialize_model(
                 **model_params,
             }
             return XGBRegressor(**params)
-        base_xgb = XGBRegressor(objective="reg:squarederror", random_state=random_state)
+        base_xgb = XGBRegressor(
+            objective="reg:squarederror",
+            random_state=random_state,
+            n_jobs=n_jobs,
+        )
         return RandomizedSearchCV(
             estimator=base_xgb,
             param_distributions=param_dist_xgb,
@@ -1181,6 +1185,7 @@ def _initialize_model(
             reg_alpha=0,
             reg_lambda=1,
             random_state=random_state,
+            n_jobs=n_jobs,
         )
         return VotingRegressor([("rf", rf), ("xgb", xgb)], n_jobs=n_jobs)
     

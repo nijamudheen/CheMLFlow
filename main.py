@@ -181,6 +181,30 @@ def _configure_logging(run_dir: str, level: int = logging.INFO) -> None:
         handler.setLevel(level)
 
 
+def _run_subprocess(cmd: list[str], *, cwd: str | None = None) -> subprocess.CompletedProcess[str]:
+    """Run a child process and raise with captured output on failure."""
+    result = subprocess.run(
+        cmd,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        command = " ".join(str(part) for part in cmd)
+        stderr = (result.stderr or "").strip()
+        stdout = (result.stdout or "").strip()
+        details: list[str] = [
+            f"Command failed with exit code {result.returncode}: {command}",
+        ]
+        if stdout:
+            details.append(f"stdout:\n{stdout}")
+        if stderr:
+            details.append(f"stderr:\n{stderr}")
+        raise RuntimeError("\n".join(details))
+    return result
+
+
 def run_node_get_data(context: dict) -> None:
     validate_contract(
         bind_output_path(GET_DATA_INPUT_CONTRACT, context["config_path"]),
@@ -188,7 +212,7 @@ def run_node_get_data(context: dict) -> None:
     )
     script_path = os.path.join("GetData", "get_data.py")
     output_file = context["paths"]["raw"]
-    subprocess.run([sys.executable, script_path, output_file, "--config", context["config_path"]])
+    _run_subprocess([sys.executable, script_path, output_file, "--config", context["config_path"]])
     validate_contract(bind_output_path(GET_DATA_OUTPUT_CONTRACT, output_file), warn_only=True)
 
 
@@ -209,12 +233,13 @@ def run_node_curate(context: dict) -> None:
 
     curate_config = context["curate_config"]
     target_column = context["target_column"]
-    properties = curate_config.get("properties")
-    if not properties:
+    properties_items = _as_str_list(curate_config.get("properties"))
+    if not properties_items:
         if pipeline_type == "qm9" or context.get("task_type") == "classification":
-            properties = target_column
+            properties_items = _as_str_list(target_column)
         else:
-            properties = "standard_value"
+            properties_items = _as_str_list("standard_value")
+    properties = ",".join(properties_items)
 
     script_path = os.path.join("utilities", "prepareActivityData.py")
     preprocessed_file = context["paths"]["preprocessed"]
@@ -254,7 +279,7 @@ def run_node_curate(context: dict) -> None:
             cmd.append("--no_prefer_largest_fragment")
     if context["keep_all_columns"]:
         cmd.append("--keep_all_columns")
-    subprocess.run(cmd)
+    _run_subprocess(cmd)
     validate_contract(bind_output_path(PREPROCESSED_CONTRACT, preprocessed_file), warn_only=True)
     validate_contract(bind_output_path(CURATE_OUTPUT_CONTRACT, curated_file), warn_only=True)
     # Establish the canonical dataset path for downstream nodes.
@@ -289,7 +314,7 @@ def run_node_featurize_lipinski(context: dict) -> None:
     script_path = os.path.join("utilities", "Lipinski_rules.py")
     smiles_file = context.get("curated_path", context["paths"]["curated"])
     output_file = context["paths"]["lipinski"]
-    subprocess.run([sys.executable, script_path, smiles_file, output_file])
+    _run_subprocess([sys.executable, script_path, smiles_file, output_file])
     validate_contract(
         bind_output_path(FEATURIZE_LIPINSKI_OUTPUT_CONTRACT, output_file),
         warn_only=True,
@@ -305,7 +330,7 @@ def run_node_label_ic50(context: dict) -> None:
     input_file = context["paths"]["lipinski"]
     output_file_3class = context["paths"]["pic50_3class"]
     output_file_2class = context["paths"]["pic50_2class"]
-    subprocess.run(
+    _run_subprocess(
         [sys.executable, script_path, input_file, output_file_3class, output_file_2class]
     )
     validate_contract(
@@ -329,10 +354,21 @@ def run_node_analyze_stats(context: dict) -> None:
     script_path = os.path.join("utilities", "stat_tests.py")
     input_file = context["paths"]["pic50_2class"]
     output_dir = context["base_dir"]
-    test_type = ["mannwhitney", "ttest", "chi2"]
     descriptor = context["target_column"]
-    for test in test_type:
-        subprocess.run([sys.executable, script_path, input_file, output_dir, test, descriptor])
+    tests = ["mannwhitney", "ttest"]
+    try:
+        stats_df = pd.read_csv(input_file)
+        if descriptor in stats_df.columns and stats_df[descriptor].nunique(dropna=True) <= 20:
+            tests.append("chi2")
+        else:
+            logging.info(
+                "Skipping chi2 for descriptor '%s' due to high cardinality/continuous values.",
+                descriptor,
+            )
+    except Exception as exc:
+        logging.warning("Could not inspect stats input for chi2 guard (%s). Running without chi2.", exc)
+    for test in tests:
+        _run_subprocess([sys.executable, script_path, input_file, output_dir, test, descriptor])
     validate_contract(
         bind_output_path(ANALYZE_STATS_OUTPUT_CONTRACT, output_dir),
         warn_only=True,
@@ -352,7 +388,7 @@ def run_node_analyze_eda(context: dict) -> None:
     input_file_2class = context["paths"]["pic50_2class"]
     input_file_3class = context["paths"]["pic50_3class"]
     output_dir = context["base_dir"]
-    subprocess.run(
+    _run_subprocess(
         [sys.executable, script_path, input_file_2class, input_file_3class, output_dir]
     )
     validate_contract(
@@ -374,7 +410,7 @@ def run_node_featurize_rdkit(context: dict) -> None:
     input_file = context.get("curated_path", context["paths"]["curated"])
     output_file = context["paths"]["rdkit_descriptors"]
     labeled_output_file = context["paths"]["rdkit_labeled"]
-    subprocess.run(
+    _run_subprocess(
         [
             sys.executable,
             script_path,
@@ -432,7 +468,7 @@ def run_node_featurize_morgan(context: dict) -> None:
         "--property-columns",
         context["target_column"],
     ]
-    subprocess.run(cmd)
+    _run_subprocess(cmd)
     with open(context["paths"]["morgan_meta"], "w", encoding="utf-8") as meta_out:
         json.dump(
             {"radius": radius, "n_bits": n_bits},
@@ -497,7 +533,7 @@ def run_node_label_normalize(context: dict) -> None:
     ]
     if drop_unmapped:
         cmd.append("--drop-unmapped")
-    subprocess.run(cmd, check=True)
+    _run_subprocess(cmd)
     context["curated_path"] = output_file
     context["target_column"] = target_column
 
@@ -1148,12 +1184,11 @@ def _exclude_feature_columns(context: dict) -> list[str]:
     raw = train_features.get("exclude_columns", [])
     if raw is None:
         return []
-    if isinstance(raw, str):
-        raw = [raw]
-    if not isinstance(raw, (list, tuple, set)):
-        raise ValueError("train.features.exclude_columns must be a list of column names.")
-    cols = [str(col).strip() for col in raw]
-    return [col for col in cols if col]
+    if not isinstance(raw, (list, tuple, set, str)):
+        raise ValueError(
+            "train.features.exclude_columns must be a list or comma-separated string of column names."
+        )
+    return _as_str_list(raw)
 
 
 def _resolve_split_partitions(
@@ -2104,7 +2139,7 @@ def run_configured_pipeline_nodes(config: dict, config_path: str) -> bool:
         "train_config": train_config,
         "model_config": model_config,
         "train_tdc_config": train_tdc_config,
-        "categorical_features": train_features_config.get("categorical_features", []),
+        "categorical_features": _as_str_list(train_features_config.get("categorical_features", [])),
         "keep_all_columns": keep_all_columns,
         "source": config.get("get_data", {}).get("source", {}),
         "run_dir": run_dir,

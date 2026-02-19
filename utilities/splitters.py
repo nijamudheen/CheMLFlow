@@ -362,20 +362,45 @@ def scaffold_split_indices(
     groups.sort(key=len, reverse=True)
 
     n_samples = len(smiles)
+    if n_samples <= 1:
+        raise ValueError("Scaffold split requires at least 2 samples.")
+    if test_size < 0 or val_size < 0:
+        raise ValueError("test_size and val_size must be non-negative.")
+    if test_size + val_size >= 1.0:
+        raise ValueError("test_size + val_size must be < 1.0.")
     n_test = int(round(test_size * n_samples))
     n_val = int(round(val_size * n_samples))
+    if test_size > 0 and n_test == 0:
+        n_test = 1
+    if val_size > 0 and n_val == 0:
+        n_val = 1
+    if n_test + n_val >= n_samples:
+        raise ValueError(
+            f"Requested split sizes leave no training data for n_samples={n_samples}: "
+            f"n_test={n_test}, n_val={n_val}."
+        )
 
-    train_idx: List[int] = []
-    val_idx: List[int] = []
-    test_idx: List[int] = []
+    train_groups: List[List[int]] = []
+    val_groups: List[List[int]] = []
+    test_groups: List[List[int]] = []
+    train_count = 0
+    val_count = 0
+    test_count = 0
 
     for group in groups:
-        if len(test_idx) + len(group) <= n_test:
-            test_idx.extend(group)
-        elif len(val_idx) + len(group) <= n_val:
-            val_idx.extend(group)
+        if test_count + len(group) <= n_test:
+            test_groups.append(group)
+            test_count += len(group)
+        elif val_count + len(group) <= n_val:
+            val_groups.append(group)
+            val_count += len(group)
         else:
-            train_idx.extend(group)
+            train_groups.append(group)
+            train_count += len(group)
+
+    train_idx = [idx for group in train_groups for idx in group]
+    val_idx = [idx for group in val_groups for idx in group]
+    test_idx = [idx for group in test_groups for idx in group]
 
     return {"train": train_idx, "val": val_idx, "test": test_idx}
 

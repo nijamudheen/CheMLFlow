@@ -153,7 +153,7 @@ get_data:
 | `source.url` | For http_csv | URL to fetch CSV from. |
 | `source.group` | For tdc | TDC dataset group (default: `ADME`). |
 | `source.name` | For tdc | TDC dataset name within the group. |
-| `max_rows` | No | Row limit for sampling. Only applies during `curate` when `pipeline_type: qm9`. |
+| `max_rows` | No | Row limit for sampling raw CSV rows. Set under `get_data`, applied during `curate` when `pipeline_type: qm9`. |
 
 ## `curate` Block
 
@@ -173,7 +173,7 @@ curate:
 |-----|---------|-------------|
 | `properties` | (auto) | Column(s) to extract. Defaults to `target_column` for QM9/classification, otherwise `standard_value`. |
 | `smiles_column` | (auto-detect) | Name of the SMILES column in raw data. |
-| `dedupe_strategy` | (none) | How to handle duplicate SMILES: `keep_first`, `keep_last`, etc. |
+| `dedupe_strategy` | (none) | How to handle duplicate SMILES: `keep_first`/`first`, `keep_last`/`last`, `drop_conflicts`, or `majority`. |
 | `label_column` | `target_column` | Label column for classification tasks. |
 | `require_neutral_charge` | `false` | When `true`, removes molecules with net charge. |
 | `prefer_largest_fragment` | `true` | When `true`, keeps only the largest fragment of multi-fragment molecules. |

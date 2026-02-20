@@ -5,6 +5,7 @@ global:
   base_dir: data/tdc_benchmark
   target_column: label
   debug: false
+  random_state: 42
   thresholds:
     active: 1000
     inactive: 10000
@@ -21,17 +22,15 @@ train_tdc:
     - Pgp_Broccatelli
   split_type: scaffold
   seeds: [1, 2, 3, 4, 5]
-
-featurize:
-  radius: 2
-  n_bits: 2048
-
-model:
-  type: catboost_classifier
-  params:
-    depth: 6
-    learning_rate: 0.1
-    iterations: 500
-    loss_function: Logloss
-    eval_metric: AUC
-    verbose: false
+  featurize:
+    radius: 2
+    n_bits: 2048
+  model:
+    type: catboost_classifier
+    params:
+      depth: 6
+      learning_rate: 0.1
+      iterations: 500
+      loss_function: Logloss
+      eval_metric: AUC
+      verbose: false

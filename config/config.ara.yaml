@@ -5,13 +5,13 @@ global:
   base_dir: data/ara
   target_column: label
   debug: false
+  random_state: 42
   thresholds:
     active: 1000
     inactive: 10000
   runs:
     enabled: true
 
-# Pipeline node order
 pipeline:
   nodes:
     - get_data
@@ -22,7 +22,6 @@ pipeline:
     - train
     - explain
 
-# Node configs
 get_data:
   data_source: local_csv
   source:
@@ -54,15 +53,15 @@ featurize:
   radius: 2
   n_bits: 2048
 
-model:
-  type: catboost_classifier
-  params:
-    depth: 6
-    learning_rate: 0.1
-    iterations: 500
-    loss_function: Logloss
-    eval_metric: AUC
-    verbose: true
-  use_hpo: true
-  hpo_trials: 30
-  patience: 20
+train:
+  model:
+    type: catboost_classifier
+    params:
+      depth: 6
+      learning_rate: 0.1
+      iterations: 500
+      loss_function: Logloss
+      eval_metric: AUC
+      verbose: true
+  early_stopping:
+    patience: 20

@@ -23,9 +23,10 @@ Downstream steps enforce only the minimum required columns for their node (e.g.,
 If your dataset already includes numeric descriptors, use the `use.curated_features` node to point training at the curated CSV directly (no RDKit/Morgan). You can also allowlist low‑cardinality categorical columns for one‑hot encoding via:
 
 ```
-preprocess:
-  categorical_features:
-    - Family
+train:
+  features:
+    categorical_features:
+      - Family
 ```
 
 `categorical_features` and `target_column` must match **column names in your dataset**.
@@ -145,6 +146,8 @@ Outputs:
 
 ## Config structure (node‑style)
 
+Full options reference: `docs/config-options.md`
+
 Each node has its own config block, and global settings live under `global`:
 # - global: shared defaults used by multiple nodes
 # - pipeline: ordered list of nodes to execute
@@ -173,6 +176,105 @@ split:
 
 Note: Train/val/test membership is defined only by the `split` node. Other nodes consume `split_indices`
 and will not create their own random splits.
+
+### Strict config scoping
+
+CheMLFlow enforces strict node-scoped config:
+
+- A top-level block is only allowed when its corresponding node is present in `pipeline.nodes`.
+- `use.curated_features` is configless (do not add a top-level `use:` block).
+- Training config is under `train.*`:
+  - `train.model.*` (type + model params)
+  - `train.tuning.*`
+  - `train.reporting.*`
+  - `train.early_stopping.*`
+  - `train.features.*`
+- Top-level `model:` is no longer supported.
+
+### Scientifically correct split modes (new)
+
+CheMLFlow now supports three split protocols from the `split` node:
+
+- `mode: holdout` (default): single train/val/test holdout (existing behavior)
+- `mode: cv`: k-fold evaluation (one fold per run, Slurm-friendly)
+- `mode: nested_holdout_cv`: outer untouched holdout + inner CV on dev
+
+Each run writes:
+
+- `run_dir/split_indices.json`
+- `run_dir/split_meta.json` (mode/stage/fold/repeat/seeds/sizes/coverage/plan linkage)
+
+#### CV mode example
+
+```yaml
+split:
+  mode: cv
+  strategy: scaffold
+  stratify: true
+  stratify_column: label
+  cv:
+    n_splits: 5
+    repeats: 3
+    fold_index: 0
+    repeat_index: 0
+    random_state: 123
+  val_from_train:
+    val_size: 0.1
+    stratify: true
+    random_state: 456
+  require_disjoint: true
+  require_full_test_coverage: true
+```
+
+#### Nested mode (inner selection) example
+
+```yaml
+split:
+  mode: nested_holdout_cv
+  stage: inner
+  strategy: scaffold
+  stratify: true
+  stratify_column: label
+  outer:
+    test_size: 0.2
+    random_state: 111
+  inner:
+    n_splits: 5
+    repeats: 3
+    fold_index: 0
+    repeat_index: 0
+    random_state: 222
+  val_from_train:
+    val_size: 0.1
+    stratify: true
+    random_state: 333
+  require_full_test_coverage: true
+```
+
+#### Nested mode (outer final) example
+
+```yaml
+split:
+  mode: nested_holdout_cv
+  stage: outer
+  strategy: scaffold
+  stratify: true
+  stratify_column: label
+  outer:
+    test_size: 0.2
+    random_state: 111
+  val_from_train:
+    val_size: 0.1
+    stratify: true
+    random_state: 444
+  require_full_test_coverage: true
+```
+
+Coverage/comparability controls:
+
+- `split.require_full_test_coverage: true` fails if cleaned features/labels drop any test rows
+- `split.min_test_coverage`, `split.min_train_coverage`, `split.min_val_coverage` set explicit thresholds
+- This protects model comparisons from "winning by dropping hard rows"
 
 ## Quick start (pipelines)
 
@@ -215,7 +317,7 @@ CHEMLFLOW_CONFIG=config/config.qm9.yaml python main.py
 
 Notes:
 - Control dataset size via `get_data.max_rows` in `config/config.qm9.yaml`.
-- Model choice is controlled by `model.type` (e.g., `random_forest`, `svm`, `decision_tree`, `xgboost`, `ensemble`).
+- Model choice is controlled by `train.model.type` (e.g., `random_forest`, `svm`, `decision_tree`, `xgboost`, `ensemble`).
 
 ### YSI (Sooting Index, local CSV → RDKit → Train → Explain)
 
@@ -287,7 +389,7 @@ Verify:
 - Summary CSV: `runs/<timestamp>/tdc_benchmark/tdc_benchmark_summary.csv`
 
 Notes:
-- This node currently supports `model.type: catboost_classifier`.
+- This node currently supports `train_tdc.model.type: catboost_classifier`.
 - The run log prints a high-visibility banner when TDC benchmark mode is active.
 - If your environment is intentionally minimal (`--no-deps` flow), you can run this in a dedicated env with `pytdc` installed.
 
@@ -309,12 +411,15 @@ Notes:
 ### Common config knobs
 
 In `config/*.yaml`:
-- `model.type`: model selection
-- `model.cv_folds`, `model.search_iters`: CV + search effort
-- `model.plot_split_performance`: optional bool; when true, saves train/val/test metrics JSON + plot in the run output dir
-- `model.foundation*`: Chemprop foundation settings (`foundation`, `foundation_checkpoint`, `freeze_encoder`)
-- `preprocess.*`: preprocessing thresholds and split settings
-- `preprocess.exclude_columns`: optional list of feature columns to remove before modeling (useful to avoid leakage fields)
+- `train.model.type`: model selection
+- `train.model.params`: model hyperparameters
+- `train.tuning.method`: `fixed` (default; fit once with `train.model.params`) or `train_cv` (sklearn inner CV search)
+- `train.tuning.cv_folds`, `train.tuning.search_iters`: sklearn search effort when `train_cv`
+- `train.reporting.plot_split_performance`: optional bool; when true, saves split metrics/plots in run output
+- `train.model.foundation*`: Chemprop foundation settings (`foundation`, `foundation_checkpoint`, `freeze_encoder`)
+- `train.features.exclude_columns`: optional list of feature columns to remove before modeling
+- `train.features.categorical_features`: categorical columns for tabular pipelines
+- `preprocess.*`: preprocessing thresholds and split settings (only used when preprocess/select nodes are in pipeline)
 - `pipeline.nodes`: ordered list of steps (e.g., add/remove `explain`)
 - `task_type`: `regression` or `classification`
 - `split.*`: split strategy and sizes (e.g., `random`, `scaffold`, `tdc_scaffold`)
@@ -322,15 +427,15 @@ In `config/*.yaml`:
 - `global.runs.enabled`: use `runs/<timestamp>` instead of `results/`
 - `global.debug`: when `true`, enables debug-style training logs; when `false` (default), classification runs are kept quiet to keep `run.log` readable
 - `global.log_level`: optional explicit logging level (e.g., `DEBUG`, `INFO`); if set to `DEBUG`, it also enables verbose classification training output
-- `train_tdc.*`: settings for `train.tdc` benchmark workflow (`group`, `benchmarks`, `split_type`, `seeds`)
+- `train_tdc.*`: settings for `train.tdc` benchmark workflow (`group`, `benchmarks`, `split_type`, `seeds`, `model`, `featurize`)
 
-For CatBoost classification (`model.type: catboost_classifier`):
-- With `global.debug: false`, CheMLFlow forces quiet CatBoost output even if `model.params.verbose: true`.
+For CatBoost classification (`train.model.type: catboost_classifier`):
+- With `global.debug: false`, CheMLFlow forces quiet CatBoost output even if `train.model.params.verbose: true`.
 - To see per-iteration CatBoost logs, set `global.debug: true` (or `global.log_level: DEBUG`).
 
 ## Chemprop backend (optional, classification only)
 
-CheMLFlow supports an in-process Chemprop D-MPNN backend behind `model.type: chemprop`.
+CheMLFlow supports an in-process Chemprop D-MPNN backend behind `train.model.type: chemprop`.
 This path is SMILES-native (no descriptor generation) and uses CheMLFlow's `split_indices`
 from the `split` node for apples-to-apples split comparability.
 
@@ -356,7 +461,7 @@ Use the included example: `config/config.pgp_chemprop.yaml`:
 CHEMLFLOW_CONFIG=config/config.pgp_chemprop.yaml python main.py
 ```
 
-This bundled example defaults to `model.foundation: none` so it runs without
+This bundled example defaults to `train.model.foundation: none` so it runs without
 an external foundation checkpoint file.
 
 ### CheMeleon foundation checkpoint
@@ -378,19 +483,20 @@ ls -lh models/chemeleon_mp.pt
 
 ### Foundation fine-tuning knobs
 
-For `model.type: chemprop` (classification path), you can enable CheMeleon initialization:
-- `model.foundation`: `none` (default) or `chemeleon`
-- `model.foundation_checkpoint`: local path to `chemeleon_mp.pt` (required when `foundation=chemeleon`)
-- `model.freeze_encoder`: whether to freeze message-passing weights after loading foundation weights (default `false`)
+For `train.model.type: chemprop` (classification path), you can enable CheMeleon initialization:
+- `train.model.foundation`: `none` (default) or `chemeleon`
+- `train.model.foundation_checkpoint`: local path to `chemeleon_mp.pt` (required when `foundation=chemeleon`)
+- `train.model.freeze_encoder`: whether to freeze message-passing weights after loading foundation weights (default `false`)
 
 Example:
 
 ```yaml
-model:
-  type: chemprop
-  foundation: chemeleon
-  foundation_checkpoint: models/chemeleon_mp.pt
-  freeze_encoder: false
+train:
+  model:
+    type: chemprop
+    foundation: chemeleon
+    foundation_checkpoint: models/chemeleon_mp.pt
+    freeze_encoder: false
 ```
 
 ### Target column
@@ -402,11 +508,11 @@ Chemprop trains on the pipeline context's `target_column`:
 ### SMILES column
 
 Chemprop expects SMILES in the curated dataset.
-Default is `canonical_smiles`. Override via `model.smiles_column` if needed.
+Default is `canonical_smiles`. Override via `train.model.smiles_column` if needed.
 
 ### Chemprop params
 
-Put these under `model.params` (all optional; defaults exist):
+Put these under `train.model.params` (all optional; defaults exist):
 - `max_epochs`
 - `batch_size`
 - `init_lr`, `max_lr`, `final_lr` (or `lr` as a fallback)

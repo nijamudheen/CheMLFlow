@@ -6,6 +6,7 @@ import pytest
 import yaml
 
 from main import validate_pipeline_nodes
+from utilities.config_validation import ConfigValidationError, validate_config_strict
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -29,6 +30,7 @@ def test_example_configs_have_valid_pipeline_split_rules(config_path: Path) -> N
     if not nodes:
         pytest.skip(f"No pipeline nodes in {config_path}")
     validate_pipeline_nodes(nodes)
+    validate_config_strict(config, nodes)
 
 
 def test_validate_pipeline_nodes_requires_split_before_training() -> None:
@@ -58,12 +60,14 @@ def test_pgp_chemprop_example_config_is_valid_yaml() -> None:
 
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     assert isinstance(config, dict)
+    assert "model" not in config, "Top-level model block is no longer allowed."
 
     global_cfg = config.get("global") or {}
     assert global_cfg.get("task_type") == "classification"
     assert global_cfg.get("target_column"), "Expected global.target_column to be set."
 
-    model_cfg = config.get("model") or {}
+    train_cfg = config.get("train") or {}
+    model_cfg = train_cfg.get("model") or {}
     assert model_cfg.get("type") == "chemprop"
     foundation_mode = str(model_cfg.get("foundation", "none")).strip().lower()
     assert foundation_mode == "none", "Default example should run without external foundation checkpoint."
@@ -73,3 +77,13 @@ def test_pgp_chemprop_example_config_is_valid_yaml() -> None:
     assert "split" in nodes, "Chemprop training requires split_indices; include the split node."
     assert "train" in nodes
     assert nodes.index("split") < nodes.index("train")
+
+
+def test_strict_validation_rejects_legacy_model_block() -> None:
+    cfg = {
+        "global": {"pipeline_type": "qm9", "base_dir": "data/qm9", "thresholds": {"active": 1, "inactive": 2}},
+        "pipeline": {"nodes": ["train"]},
+        "model": {"type": "decision_tree"},
+    }
+    with pytest.raises(ConfigValidationError, match="CFG_LEGACY_MODEL_BLOCK_FORBIDDEN"):
+        validate_config_strict(cfg, ["train"])

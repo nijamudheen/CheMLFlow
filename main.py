@@ -1,5 +1,6 @@
 # an example workflow that uses ChemBL bioactivty data
 import csv
+import hashlib
 import json
 import logging
 import os
@@ -59,6 +60,7 @@ from contracts import (
 from MLModels import data_preprocessing
 from MLModels import train_models
 from utilities import splitters
+from utilities.config_validation import validate_config_strict
 
 def build_paths(base_dir: str) -> dict[str, str]:
     return {
@@ -141,6 +143,12 @@ def _resolve_log_level(global_config: dict) -> int:
     return logging.INFO
 
 
+def _resolve_seed(global_seed: int, override: object | None = None) -> int:
+    if override is None:
+        return int(global_seed)
+    return int(override)
+
+
 def _configure_logging(run_dir: str, level: int = logging.INFO) -> None:
     """Configure root logger to emit to stdout and to <run_dir>/run.log.
 
@@ -173,6 +181,30 @@ def _configure_logging(run_dir: str, level: int = logging.INFO) -> None:
         handler.setLevel(level)
 
 
+def _run_subprocess(cmd: list[str], *, cwd: str | None = None) -> subprocess.CompletedProcess[str]:
+    """Run a child process and raise with captured output on failure."""
+    result = subprocess.run(
+        cmd,
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        command = " ".join(str(part) for part in cmd)
+        stderr = (result.stderr or "").strip()
+        stdout = (result.stdout or "").strip()
+        details: list[str] = [
+            f"Command failed with exit code {result.returncode}: {command}",
+        ]
+        if stdout:
+            details.append(f"stdout:\n{stdout}")
+        if stderr:
+            details.append(f"stderr:\n{stderr}")
+        raise RuntimeError("\n".join(details))
+    return result
+
+
 def run_node_get_data(context: dict) -> None:
     validate_contract(
         bind_output_path(GET_DATA_INPUT_CONTRACT, context["config_path"]),
@@ -180,7 +212,7 @@ def run_node_get_data(context: dict) -> None:
     )
     script_path = os.path.join("GetData", "get_data.py")
     output_file = context["paths"]["raw"]
-    subprocess.run([sys.executable, script_path, output_file, "--config", context["config_path"]])
+    _run_subprocess([sys.executable, script_path, output_file, "--config", context["config_path"]])
     validate_contract(bind_output_path(GET_DATA_OUTPUT_CONTRACT, output_file), warn_only=True)
 
 
@@ -201,12 +233,13 @@ def run_node_curate(context: dict) -> None:
 
     curate_config = context["curate_config"]
     target_column = context["target_column"]
-    properties = curate_config.get("properties")
-    if not properties:
+    properties_items = _as_str_list(curate_config.get("properties"))
+    if not properties_items:
         if pipeline_type == "qm9" or context.get("task_type") == "classification":
-            properties = target_column
+            properties_items = _as_str_list(target_column)
         else:
-            properties = "standard_value"
+            properties_items = _as_str_list("standard_value")
+    properties = ",".join(properties_items)
 
     script_path = os.path.join("utilities", "prepareActivityData.py")
     preprocessed_file = context["paths"]["preprocessed"]
@@ -246,7 +279,7 @@ def run_node_curate(context: dict) -> None:
             cmd.append("--no_prefer_largest_fragment")
     if context["keep_all_columns"]:
         cmd.append("--keep_all_columns")
-    subprocess.run(cmd)
+    _run_subprocess(cmd)
     validate_contract(bind_output_path(PREPROCESSED_CONTRACT, preprocessed_file), warn_only=True)
     validate_contract(bind_output_path(CURATE_OUTPUT_CONTRACT, curated_file), warn_only=True)
     # Establish the canonical dataset path for downstream nodes.
@@ -281,7 +314,7 @@ def run_node_featurize_lipinski(context: dict) -> None:
     script_path = os.path.join("utilities", "Lipinski_rules.py")
     smiles_file = context.get("curated_path", context["paths"]["curated"])
     output_file = context["paths"]["lipinski"]
-    subprocess.run([sys.executable, script_path, smiles_file, output_file])
+    _run_subprocess([sys.executable, script_path, smiles_file, output_file])
     validate_contract(
         bind_output_path(FEATURIZE_LIPINSKI_OUTPUT_CONTRACT, output_file),
         warn_only=True,
@@ -297,7 +330,7 @@ def run_node_label_ic50(context: dict) -> None:
     input_file = context["paths"]["lipinski"]
     output_file_3class = context["paths"]["pic50_3class"]
     output_file_2class = context["paths"]["pic50_2class"]
-    subprocess.run(
+    _run_subprocess(
         [sys.executable, script_path, input_file, output_file_3class, output_file_2class]
     )
     validate_contract(
@@ -321,10 +354,21 @@ def run_node_analyze_stats(context: dict) -> None:
     script_path = os.path.join("utilities", "stat_tests.py")
     input_file = context["paths"]["pic50_2class"]
     output_dir = context["base_dir"]
-    test_type = ["mannwhitney", "ttest", "chi2"]
     descriptor = context["target_column"]
-    for test in test_type:
-        subprocess.run([sys.executable, script_path, input_file, output_dir, test, descriptor])
+    tests = ["mannwhitney", "ttest"]
+    try:
+        stats_df = pd.read_csv(input_file)
+        if descriptor in stats_df.columns and stats_df[descriptor].nunique(dropna=True) <= 20:
+            tests.append("chi2")
+        else:
+            logging.info(
+                "Skipping chi2 for descriptor '%s' due to high cardinality/continuous values.",
+                descriptor,
+            )
+    except Exception as exc:
+        logging.warning("Could not inspect stats input for chi2 guard (%s). Running without chi2.", exc)
+    for test in tests:
+        _run_subprocess([sys.executable, script_path, input_file, output_dir, test, descriptor])
     validate_contract(
         bind_output_path(ANALYZE_STATS_OUTPUT_CONTRACT, output_dir),
         warn_only=True,
@@ -344,7 +388,7 @@ def run_node_analyze_eda(context: dict) -> None:
     input_file_2class = context["paths"]["pic50_2class"]
     input_file_3class = context["paths"]["pic50_3class"]
     output_dir = context["base_dir"]
-    subprocess.run(
+    _run_subprocess(
         [sys.executable, script_path, input_file_2class, input_file_3class, output_dir]
     )
     validate_contract(
@@ -366,7 +410,7 @@ def run_node_featurize_rdkit(context: dict) -> None:
     input_file = context.get("curated_path", context["paths"]["curated"])
     output_file = context["paths"]["rdkit_descriptors"]
     labeled_output_file = context["paths"]["rdkit_labeled"]
-    subprocess.run(
+    _run_subprocess(
         [
             sys.executable,
             script_path,
@@ -424,7 +468,7 @@ def run_node_featurize_morgan(context: dict) -> None:
         "--property-columns",
         context["target_column"],
     ]
-    subprocess.run(cmd)
+    _run_subprocess(cmd)
     with open(context["paths"]["morgan_meta"], "w", encoding="utf-8") as meta_out:
         json.dump(
             {"radius": radius, "n_bits": n_bits},
@@ -489,26 +533,27 @@ def run_node_label_normalize(context: dict) -> None:
     ]
     if drop_unmapped:
         cmd.append("--drop-unmapped")
-    subprocess.run(cmd, check=True)
+    _run_subprocess(cmd)
     context["curated_path"] = output_file
     context["target_column"] = target_column
 
 
 def run_node_split(context: dict) -> None:
     split_config = context.get("split_config", {})
-    strategy = split_config.get("strategy", "random")
-    test_size = split_config.get("test_size", 0.2)
-    val_size = split_config.get("val_size", 0.1)
-    random_state = split_config.get("random_state", 42)
-    stratify = split_config.get("stratify", False)
+    mode = str(split_config.get("mode", "holdout")).strip().lower() or "holdout"
+    strategy = str(split_config.get("strategy", "random")).strip().lower() or "random"
+    test_size = float(split_config.get("test_size", 0.2))
+    val_size = float(split_config.get("val_size", 0.1))
+    random_state = int(split_config.get("random_state", context.get("global_random_state", 42)))
+    stratify = _as_bool(split_config.get("stratify", False))
     stratify_column = split_config.get("stratify_column")
     min_coverage = split_config.get("min_coverage")
-    allow_missing_val = split_config.get("allow_missing_val", True)
-    require_disjoint = split_config.get("require_disjoint", False)
+    allow_missing_val = _as_bool(split_config.get("allow_missing_val", True))
+    require_disjoint = _as_bool(split_config.get("require_disjoint", False))
     if stratify and not stratify_column:
         stratify_column = context.get("target_column")
 
-    def _safe_token(value: str) -> str:
+    def _safe_token(value: object) -> str:
         out = []
         for ch in str(value):
             if ch.isalnum() or ch in {"_", "-"}:
@@ -517,12 +562,115 @@ def run_node_split(context: dict) -> None:
                 out.append("_")
         return "".join(out)
 
-    def _fmt_float(value) -> str:
-        # 0.2 -> 0p2 for stable filenames
+    def _fmt_float(value: object) -> str:
         try:
             return str(float(value)).replace(".", "p")
         except Exception:
             return _safe_token(str(value))
+
+    def _normalize_split_keys(raw: dict) -> dict[str, list[int]]:
+        normalized: dict[str, list[int]] = {}
+        for key, value in raw.items():
+            lowered = str(key).lower()
+            values = [int(i) for i in (value or [])]
+            if lowered in {"valid", "val", "validation"}:
+                normalized["val"] = values
+            elif lowered == "test":
+                normalized["test"] = values
+            elif lowered == "train":
+                normalized["train"] = values
+            else:
+                normalized[lowered] = values
+        normalized.setdefault("train", [])
+        normalized.setdefault("val", [])
+        normalized.setdefault("test", [])
+        return normalized
+
+    def _plan_id(payload: dict) -> str:
+        body = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        return hashlib.sha256(body.encode("utf-8")).hexdigest()[:12]
+
+    def _load_or_build_plan(plan_path: str, builder) -> dict:
+        if os.path.exists(plan_path):
+            try:
+                return splitters.load_split_plan(plan_path)
+            except json.JSONDecodeError as exc:
+                logging.warning("Corrupt split plan at %s (%s); rebuilding.", plan_path, exc)
+        plan = builder()
+        splitters.save_split_plan(plan, plan_path)
+        return splitters.load_split_plan(plan_path)
+
+    def _extract_test_indices_from_plan(plan: dict, repeat_index: int, fold_index: int) -> list[int]:
+        repeat_plans = list(plan.get("repeat_plans") or [])
+        if repeat_index < 0 or repeat_index >= len(repeat_plans):
+            raise ValueError(
+                f"repeat_index={repeat_index} out of bounds for repeats={len(repeat_plans)}."
+            )
+        folds = list((repeat_plans[repeat_index] or {}).get("folds") or [])
+        if fold_index < 0 or fold_index >= len(folds):
+            raise ValueError(
+                f"fold_index={fold_index} out of bounds for n_splits={len(folds)}."
+            )
+        return sorted(int(i) for i in (folds[fold_index] or {}).get("test_indices", []))
+
+    def _split_train_pool(
+        train_pool: list[int],
+        val_cfg: dict,
+        base_seed: int,
+    ) -> tuple[list[int], list[int], dict]:
+        if not train_pool:
+            return [], [], {"requested_val_size": 0.0, "random_state": int(base_seed), "stratify": False}
+        local_val_size = float(val_cfg.get("val_size", split_config.get("val_size", 0.0)))
+        local_stratify = _as_bool(val_cfg.get("stratify", stratify))
+        local_seed = int(val_cfg.get("random_state", base_seed))
+
+        if local_val_size <= 0:
+            return sorted(int(i) for i in train_pool), [], {
+                "requested_val_size": local_val_size,
+                "random_state": local_seed,
+                "stratify": local_stratify,
+            }
+        if len(train_pool) < 2:
+            raise ValueError(
+                f"val_from_train requested (val_size={local_val_size}) but train_pool has only "
+                f"{len(train_pool)} rows; cannot create train/val split."
+            )
+
+        stratify_values = None
+        if local_stratify:
+            if not stratify_column:
+                raise ValueError("Stratified val_from_train requires split.stratify_column.")
+            stratify_values = curated_df.iloc[train_pool][stratify_column].to_numpy()
+
+        try:
+            local_split = splitters.random_split_indices(
+                n_samples=len(train_pool),
+                test_size=local_val_size,
+                val_size=0.0,
+                random_state=local_seed,
+                stratify=stratify_values,
+            )
+        except ValueError as exc:
+            raise ValueError(
+                "Unable to create val_from_train split. "
+                f"train_pool_rows={len(train_pool)} val_size={local_val_size} "
+                f"stratify={local_stratify} random_state={local_seed}."
+            ) from exc
+        local_train = [int(i) for i in local_split.get("train", [])]
+        local_val = [int(i) for i in local_split.get("test", [])]
+        if not local_train or not local_val:
+            raise ValueError(
+                "val_from_train produced an empty train or val split. "
+                f"train_pool_rows={len(train_pool)} val_size={local_val_size} "
+                f"-> train_rows={len(local_train)} val_rows={len(local_val)}."
+            )
+        train_idx = sorted(int(train_pool[i]) for i in local_train)
+        val_idx = sorted(int(train_pool[i]) for i in local_val)
+        return train_idx, val_idx, {
+            "requested_val_size": local_val_size,
+            "random_state": local_seed,
+            "stratify": local_stratify,
+        }
 
     curated_path = context.get("curated_path", context["paths"]["curated"])
     curated_df = pd.read_csv(curated_path)
@@ -534,56 +682,413 @@ def run_node_split(context: dict) -> None:
                 f"split.stratify_column={stratify_column!r} not found in curated data."
             )
         unique = curated_df[stratify_column].dropna().nunique()
-        # sklearn stratify expects discrete labels; guard against accidental regression stratification.
         if unique > 20:
             raise ValueError(
                 f"split.stratify_column={stratify_column!r} has {unique} unique values; "
                 "stratification requires a low-cardinality label column (e.g., binary class)."
             )
+
+    os.makedirs(context["paths"]["split_dir"], exist_ok=True)
+    curated_count = len(curated_df)
+    all_indices_ordered = list(range(curated_count))
+    dataset_fingerprint = splitters.compute_dataset_fingerprint(
+        curated_df,
+        target_column=context.get("target_column"),
+    )
     tdc_group = context.get("source", {}).get("group")
     tdc_name = context.get("source", {}).get("name")
-    split_indices = splitters.build_split_indices(
-        strategy=strategy,
-        curated_df=curated_df,
-        test_size=test_size,
-        val_size=val_size,
-        random_state=random_state,
-        stratify_column=stratify_column,
-        tdc_group=tdc_group,
-        tdc_name=tdc_name,
-    )
-    normalized = {}
-    for key, value in split_indices.items():
-        lowered = key.lower()
-        if lowered in {"valid", "val", "validation"}:
-            normalized["val"] = value
-        elif lowered in {"test"}:
-            normalized["test"] = value
-        elif lowered in {"train"}:
-            normalized["train"] = value
+
+    split_indices_raw: dict
+    split_meta: dict[str, object] = {
+        "mode": mode,
+        "strategy": strategy,
+        "dataset_rows": int(curated_count),
+        "dataset_fingerprint": dataset_fingerprint,
+        "stratify": bool(stratify),
+        "stratify_column": stratify_column,
+        "random_state": int(random_state),
+        "source_tdc_group": tdc_group,
+        "source_tdc_name": tdc_name,
+    }
+    split_filename_parts: list[str] = []
+
+    if mode == "holdout":
+        split_indices_raw = splitters.build_split_indices(
+            strategy=strategy,
+            curated_df=curated_df,
+            test_size=test_size,
+            val_size=val_size,
+            random_state=random_state,
+            stratify_column=stratify_column if stratify else None,
+            tdc_group=tdc_group,
+            tdc_name=tdc_name,
+        )
+        split_meta.update(
+            {
+                "stage": "holdout",
+                "test_size": float(test_size),
+                "val_size": float(val_size),
+                "repeat_index": None,
+                "fold_index": None,
+                "plan_id": None,
+                "plan_path": None,
+            }
+        )
+        split_filename_parts = [
+            _safe_token(strategy),
+            f"test{_fmt_float(test_size)}",
+            f"val{_fmt_float(val_size)}",
+            f"seed{_safe_token(random_state)}",
+        ]
+        if stratify and stratify_column:
+            split_filename_parts.append(f"strat_{_safe_token(stratify_column)}")
+        if strategy.startswith("tdc") and tdc_group and tdc_name:
+            split_filename_parts.append(f"tdc_{_safe_token(tdc_group)}_{_safe_token(tdc_name)}")
+
+    elif mode == "cv":
+        if strategy not in {"random", "scaffold"}:
+            raise ValueError(
+                f"split.mode=cv currently supports strategy=random|scaffold; got {strategy!r}."
+            )
+        if strategy == "scaffold" and stratify:
+            logging.warning(
+                "split.mode=cv with strategy=scaffold ignores split.stratify; scaffold grouping defines folds."
+            )
+        cv_cfg = split_config.get("cv", {}) or {}
+        n_splits = int(cv_cfg.get("n_splits", 5))
+        repeats = int(cv_cfg.get("repeats", 1))
+        fold_index = int(cv_cfg.get("fold_index", 0))
+        repeat_index = int(cv_cfg.get("repeat_index", 0))
+        cv_seed = int(cv_cfg.get("random_state", random_state))
+
+        plan_spec = {
+            "mode": mode,
+            "strategy": strategy,
+            "dataset_rows": int(curated_count),
+            "dataset_fingerprint": dataset_fingerprint,
+            "n_splits": n_splits,
+            "repeats": repeats,
+            "random_state": cv_seed,
+            "stratify": bool(stratify),
+            "stratify_column": stratify_column,
+        }
+        plan_id = _plan_id(plan_spec)
+        plan_path = os.path.join(
+            context["paths"]["split_dir"],
+            f"{_safe_token(strategy)}_cv_k{n_splits}_r{repeats}_seed{cv_seed}_{plan_id}.plan.json",
+        )
+
+        def _build_cv_plan():
+            stratify_values = None
+            if stratify and stratify_column:
+                stratify_values = curated_df[stratify_column].to_numpy()
+            if strategy == "scaffold":
+                if "canonical_smiles" not in curated_df.columns:
+                    raise ValueError("Curated data must include canonical_smiles for scaffold CV splitting.")
+                return splitters.scaffold_kfold_plan(
+                    smiles_list=curated_df["canonical_smiles"].astype(str).tolist(),
+                    n_splits=n_splits,
+                    repeats=repeats,
+                    random_state=cv_seed,
+                    dataset_fingerprint=dataset_fingerprint,
+                )
+            return splitters.random_kfold_plan(
+                n_samples=curated_count,
+                n_splits=n_splits,
+                repeats=repeats,
+                random_state=cv_seed,
+                stratify=stratify_values,
+                dataset_fingerprint=dataset_fingerprint,
+            )
+
+        plan = _load_or_build_plan(plan_path, _build_cv_plan)
+        if int(plan.get("n_rows", -1)) != curated_count:
+            raise ValueError(
+                f"CV plan row-count mismatch: plan={plan.get('n_rows')} current={curated_count}. "
+                "Delete stale plan file or update split parameters."
+            )
+        if str(plan.get("dataset_fingerprint")) != dataset_fingerprint:
+            raise ValueError(
+                "CV plan dataset fingerprint mismatch. Delete stale plan file or keep dataset fixed."
+            )
+
+        test_idx = _extract_test_indices_from_plan(plan, repeat_index=repeat_index, fold_index=fold_index)
+        test_set = set(test_idx)
+        train_pool = [i for i in all_indices_ordered if i not in test_set]
+        train_pool.sort()
+        train_idx, val_idx, val_meta = _split_train_pool(
+            train_pool=train_pool,
+            val_cfg=split_config.get("val_from_train", {}) or {},
+            base_seed=cv_seed + repeat_index * 1000 + fold_index,
+        )
+        split_indices_raw = {"train": train_idx, "val": val_idx, "test": test_idx}
+        split_meta.update(
+            {
+                "stage": "cv",
+                "repeat_index": repeat_index,
+                "fold_index": fold_index,
+                "cv": {
+                    "n_splits": n_splits,
+                    "repeats": repeats,
+                    "random_state": cv_seed,
+                },
+                "val_from_train": val_meta,
+                "plan_id": plan_id,
+                "plan_path": plan_path,
+            }
+        )
+        split_filename_parts = [
+            _safe_token(mode),
+            _safe_token(strategy),
+            f"k{n_splits}",
+            f"r{repeats}",
+            f"rep{repeat_index}",
+            f"fold{fold_index}",
+            f"seed{cv_seed}",
+            plan_id,
+        ]
+
+    elif mode == "nested_holdout_cv":
+        if strategy not in {"random", "scaffold"}:
+            raise ValueError(
+                f"split.mode=nested_holdout_cv currently supports strategy=random|scaffold; got {strategy!r}."
+            )
+        if strategy == "scaffold" and stratify:
+            logging.warning(
+                "split.mode=nested_holdout_cv with strategy=scaffold ignores split.stratify; "
+                "scaffold grouping defines holdout/CV membership."
+            )
+        stage = str(split_config.get("stage", "inner")).strip().lower()
+        if stage not in {"inner", "outer"}:
+            raise ValueError("split.stage must be 'inner' or 'outer' for split.mode=nested_holdout_cv.")
+
+        outer_cfg = split_config.get("outer", {}) or {}
+        outer_test_size = float(outer_cfg.get("test_size", split_config.get("test_size", 0.2)))
+        outer_seed = int(outer_cfg.get("random_state", random_state))
+        outer_spec = {
+            "mode": mode,
+            "strategy": strategy,
+            "stage": "outer_plan",
+            "dataset_rows": int(curated_count),
+            "dataset_fingerprint": dataset_fingerprint,
+            "test_size": outer_test_size,
+            "random_state": outer_seed,
+            "stratify": bool(stratify),
+            "stratify_column": stratify_column,
+        }
+        outer_plan_id = _plan_id(outer_spec)
+        outer_plan_path = os.path.join(
+            context["paths"]["split_dir"],
+            f"{_safe_token(strategy)}_nested_outer_test{_fmt_float(outer_test_size)}_seed{outer_seed}_{outer_plan_id}.plan.json",
+        )
+
+        def _build_outer_plan():
+            if strategy == "scaffold":
+                if "canonical_smiles" not in curated_df.columns:
+                    raise ValueError("Curated data must include canonical_smiles for scaffold splitting.")
+                split = splitters.scaffold_split_indices(
+                    curated_df["canonical_smiles"].astype(str).tolist(),
+                    test_size=outer_test_size,
+                    val_size=0.0,
+                    random_state=outer_seed,
+                )
+            else:
+                stratify_values = None
+                if stratify and stratify_column:
+                    stratify_values = curated_df[stratify_column].to_numpy()
+                split = splitters.random_split_indices(
+                    n_samples=curated_count,
+                    test_size=outer_test_size,
+                    val_size=0.0,
+                    random_state=outer_seed,
+                    stratify=stratify_values,
+                )
+            return {
+                "version": 1,
+                "plan_type": "nested_outer_holdout",
+                "strategy": strategy,
+                "dataset_fingerprint": dataset_fingerprint,
+                "n_rows": curated_count,
+                "test_size": outer_test_size,
+                "random_state": outer_seed,
+                "test_indices": [int(i) for i in split.get("test", [])],
+            }
+
+        outer_plan = _load_or_build_plan(outer_plan_path, _build_outer_plan)
+        if int(outer_plan.get("n_rows", -1)) != curated_count:
+            raise ValueError(
+                f"Nested outer plan row-count mismatch: plan={outer_plan.get('n_rows')} current={curated_count}. "
+                "Delete stale outer plan or keep dataset fixed."
+            )
+        if str(outer_plan.get("dataset_fingerprint")) != dataset_fingerprint:
+            raise ValueError(
+                "Nested outer plan dataset fingerprint mismatch. Delete stale outer plan or keep dataset fixed."
+            )
+        outer_test_idx = sorted(int(i) for i in outer_plan.get("test_indices", []))
+        outer_test_set = set(outer_test_idx)
+        dev_idx = [i for i in all_indices_ordered if i not in outer_test_set]
+        dev_idx.sort()
+
+        split_meta.update(
+            {
+                "stage": stage,
+                "outer": {
+                    "test_size": outer_test_size,
+                    "random_state": outer_seed,
+                    "plan_id": outer_plan_id,
+                    "plan_path": outer_plan_path,
+                    "outer_test_size": len(outer_test_idx),
+                    "dev_size": len(dev_idx),
+                },
+            }
+        )
+
+        if stage == "outer":
+            train_idx, val_idx, val_meta = _split_train_pool(
+                train_pool=dev_idx,
+                val_cfg=split_config.get("val_from_train", {}) or {},
+                base_seed=outer_seed + 999,
+            )
+            split_indices_raw = {"train": train_idx, "val": val_idx, "test": outer_test_idx}
+            split_meta.update(
+                {
+                    "repeat_index": None,
+                    "fold_index": None,
+                    "val_from_train": val_meta,
+                    "plan_id": outer_plan_id,
+                    "plan_path": outer_plan_path,
+                    "inner": None,
+                }
+            )
+            split_filename_parts = [
+                _safe_token(mode),
+                "outer",
+                _safe_token(strategy),
+                f"test{_fmt_float(outer_test_size)}",
+                f"seed{outer_seed}",
+                outer_plan_id,
+            ]
         else:
-            normalized[key] = value
-    normalized.setdefault("val", [])
-    os.makedirs(context["paths"]["split_dir"], exist_ok=True)
-    split_filename_parts = [
-        _safe_token(strategy),
-        f"test{_fmt_float(test_size)}",
-        f"val{_fmt_float(val_size)}",
-        f"seed{_safe_token(random_state)}",
-    ]
-    if stratify and stratify_column:
-        split_filename_parts.append(f"strat_{_safe_token(stratify_column)}")
-    if strategy.startswith("tdc") and tdc_group and tdc_name:
-        split_filename_parts.append(f"tdc_{_safe_token(tdc_group)}_{_safe_token(tdc_name)}")
+            inner_cfg = split_config.get("inner", {}) or {}
+            n_splits = int(inner_cfg.get("n_splits", 5))
+            repeats = int(inner_cfg.get("repeats", 1))
+            fold_index = int(inner_cfg.get("fold_index", 0))
+            repeat_index = int(inner_cfg.get("repeat_index", 0))
+            inner_seed = int(inner_cfg.get("random_state", random_state))
+
+            dev_df = curated_df.iloc[dev_idx].reset_index(drop=True)
+            inner_spec = {
+                "mode": mode,
+                "stage": "inner",
+                "strategy": strategy,
+                "dataset_rows": int(curated_count),
+                "dataset_fingerprint": dataset_fingerprint,
+                "outer_plan_id": outer_plan_id,
+                "dev_rows": len(dev_idx),
+                "n_splits": n_splits,
+                "repeats": repeats,
+                "random_state": inner_seed,
+                "stratify": bool(stratify),
+                "stratify_column": stratify_column,
+            }
+            inner_plan_id = _plan_id(inner_spec)
+            inner_plan_path = os.path.join(
+                context["paths"]["split_dir"],
+                f"{_safe_token(strategy)}_nested_inner_k{n_splits}_r{repeats}_seed{inner_seed}_{inner_plan_id}.plan.json",
+            )
+
+            def _build_inner_plan():
+                stratify_values = None
+                if stratify and stratify_column and stratify_column in dev_df.columns:
+                    stratify_values = dev_df[stratify_column].to_numpy()
+                if strategy == "scaffold":
+                    if "canonical_smiles" not in dev_df.columns:
+                        raise ValueError("Curated data must include canonical_smiles for scaffold CV splitting.")
+                    return splitters.scaffold_kfold_plan(
+                        smiles_list=dev_df["canonical_smiles"].astype(str).tolist(),
+                        n_splits=n_splits,
+                        repeats=repeats,
+                        random_state=inner_seed,
+                        dataset_fingerprint=dataset_fingerprint,
+                    )
+                return splitters.random_kfold_plan(
+                    n_samples=len(dev_df),
+                    n_splits=n_splits,
+                    repeats=repeats,
+                    random_state=inner_seed,
+                    stratify=stratify_values,
+                    dataset_fingerprint=dataset_fingerprint,
+                )
+
+            inner_plan = _load_or_build_plan(inner_plan_path, _build_inner_plan)
+            if int(inner_plan.get("n_rows", -1)) != len(dev_df):
+                raise ValueError(
+                    f"Nested inner plan row-count mismatch: plan={inner_plan.get('n_rows')} current={len(dev_df)}. "
+                    "Delete stale inner plan or keep dataset fixed."
+                )
+            if str(inner_plan.get("dataset_fingerprint")) != dataset_fingerprint:
+                raise ValueError(
+                    "Nested inner plan dataset fingerprint mismatch. Delete stale inner plan or keep dataset fixed."
+                )
+            local_test_idx = _extract_test_indices_from_plan(
+                inner_plan,
+                repeat_index=repeat_index,
+                fold_index=fold_index,
+            )
+            fold_test_idx = sorted(int(dev_idx[i]) for i in local_test_idx)
+            fold_test_set = set(fold_test_idx)
+            train_pool = [i for i in dev_idx if i not in fold_test_set]
+            train_pool.sort()
+            train_idx, val_idx, val_meta = _split_train_pool(
+                train_pool=train_pool,
+                val_cfg=split_config.get("val_from_train", {}) or {},
+                base_seed=inner_seed + repeat_index * 1000 + fold_index,
+            )
+            split_indices_raw = {"train": train_idx, "val": val_idx, "test": fold_test_idx}
+            split_meta.update(
+                {
+                    "repeat_index": repeat_index,
+                    "fold_index": fold_index,
+                    "val_from_train": val_meta,
+                    "plan_id": inner_plan_id,
+                    "plan_path": inner_plan_path,
+                    "inner": {
+                        "n_splits": n_splits,
+                        "repeats": repeats,
+                        "random_state": inner_seed,
+                        "plan_id": inner_plan_id,
+                        "plan_path": inner_plan_path,
+                    },
+                }
+            )
+            split_filename_parts = [
+                _safe_token(mode),
+                "inner",
+                _safe_token(strategy),
+                f"k{n_splits}",
+                f"r{repeats}",
+                f"rep{repeat_index}",
+                f"fold{fold_index}",
+                f"seed{inner_seed}",
+                outer_plan_id,
+                inner_plan_id,
+            ]
+    else:
+        raise ValueError(
+            f"Unsupported split.mode={mode!r}. Expected one of: holdout, cv, nested_holdout_cv."
+        )
+
+    normalized = _normalize_split_keys(split_indices_raw)
     dataset_split_path = os.path.join(
         context["paths"]["split_dir"],
         "_".join(split_filename_parts) + ".json",
     )
     run_split_path = os.path.join(context["run_dir"], "split_indices.json")
+    run_split_meta_path = os.path.join(context["run_dir"], "split_meta.json")
 
     splitters.save_split_indices(normalized, dataset_split_path)
     splitters.save_split_indices(normalized, run_split_path)
-    curated_count = len(curated_df)
+
     train_set = set(normalized.get("train", []))
     val_set = set(normalized.get("val", []))
     test_set = set(normalized.get("test", []))
@@ -596,7 +1101,7 @@ def run_node_split(context: dict) -> None:
         coverage = len(all_indices) / max(1, curated_count)
         if coverage < min_coverage:
             raise ValueError(
-                f"Split coverage {coverage:.2%} below min_coverage={min_coverage:.2%}. "
+                f"Split coverage {coverage:.2%} below min_coverage={float(min_coverage):.2%}. "
                 "Check split mapping or strategy."
             )
     overlap = (train_set & val_set) | (train_set & test_set) | (val_set & test_set)
@@ -609,14 +1114,40 @@ def run_node_split(context: dict) -> None:
         raise ValueError("Split mapping produced empty train split.")
     if not normalized.get("test"):
         raise ValueError("Split mapping produced empty test split.")
-    if val_size > 0 and not normalized.get("val"):
+
+    expected_val_size = split_meta.get("val_from_train", {}).get("requested_val_size", val_size)
+    if float(expected_val_size or 0) > 0 and not normalized.get("val"):
         if strategy.startswith("tdc") and allow_missing_val:
             pass
         else:
             raise ValueError("Split mapping produced empty validation split.")
+
+    split_meta.update(
+        {
+            "split_indices_path": run_split_path,
+            "dataset_split_path": dataset_split_path,
+            "sizes": {
+                "train": len(normalized.get("train", [])),
+                "val": len(normalized.get("val", [])),
+                "test": len(normalized.get("test", [])),
+                "assigned_total": len(all_indices),
+            },
+            "coverage": {
+                "curated_rows": curated_count,
+                "assigned_rows": len(all_indices),
+                "assigned_fraction": len(all_indices) / max(1, curated_count),
+            },
+            "require_disjoint": require_disjoint,
+        }
+    )
+    with open(run_split_meta_path, "w", encoding="utf-8") as f:
+        json.dump(split_meta, f, indent=2)
+
     context["split_indices"] = normalized
     context["split_path"] = run_split_path
     context["dataset_split_path"] = dataset_split_path
+    context["split_meta_path"] = run_split_meta_path
+    context["split_meta"] = split_meta
 
 
 def _resolve_feature_inputs(context: dict) -> tuple[str, str]:
@@ -640,21 +1171,24 @@ def _preprocess_params(context: dict) -> tuple[float, float, tuple[float, float]
     if isinstance(clip_range, list):
         clip_range = tuple(clip_range)
     stable_k = preprocess_config.get("stable_features_k", 50)
-    random_state = preprocess_config.get("random_state", 42)
+    random_state = _resolve_seed(
+        context.get("global_random_state", 42),
+        preprocess_config.get("random_state"),
+    )
     return variance_threshold, corr_threshold, clip_range, stable_k, random_state
 
 
 def _exclude_feature_columns(context: dict) -> list[str]:
-    preprocess_config = context.get("preprocess_config", {})
-    raw = preprocess_config.get("exclude_columns", context.get("exclude_columns", []))
+    train_config = context.get("train_config", {}) or {}
+    train_features = train_config.get("features", {}) if isinstance(train_config, dict) else {}
+    raw = train_features.get("exclude_columns", [])
     if raw is None:
         return []
-    if isinstance(raw, str):
-        raw = [raw]
-    if not isinstance(raw, (list, tuple, set)):
-        raise ValueError("preprocess.exclude_columns must be a list of column names.")
-    cols = [str(col).strip() for col in raw]
-    return [col for col in cols if col]
+    if not isinstance(raw, (list, tuple, set, str)):
+        raise ValueError(
+            "train.features.exclude_columns must be a list or comma-separated string of column names."
+        )
+    return _as_str_list(raw)
 
 
 def _resolve_split_partitions(
@@ -672,6 +1206,7 @@ def _resolve_split_partitions(
     if not split_indices:
         return None
 
+    split_config = context.get("split_config", {}) or {}
     train_idx = list(split_indices.get("train", []) or [])
     val_idx = list(split_indices.get("val", []) or [])
     test_idx = list(split_indices.get("test", []) or [])
@@ -681,9 +1216,59 @@ def _resolve_split_partitions(
 
     orig_counts = (len(train_idx), len(val_idx), len(test_idx))
     available = set(index.tolist())
+    original_by_split = {
+        "train": list(train_idx),
+        "val": list(val_idx),
+        "test": list(test_idx),
+    }
     train_idx = [i for i in train_idx if i in available]
     val_idx = [i for i in val_idx if i in available]
     test_idx = [i for i in test_idx if i in available]
+
+    filtered_by_split = {
+        "train": list(train_idx),
+        "val": list(val_idx),
+        "test": list(test_idx),
+    }
+    missing_by_split = {
+        name: max(0, len(original_by_split[name]) - len(filtered_by_split[name]))
+        for name in ("train", "val", "test")
+    }
+
+    def _coverage(split_name: str) -> float:
+        original = len(original_by_split[split_name])
+        if original == 0:
+            return 1.0
+        return len(filtered_by_split[split_name]) / original
+
+    require_full_test_coverage = _as_bool(split_config.get("require_full_test_coverage", False))
+    min_test_coverage = split_config.get("min_test_coverage")
+    min_train_coverage = split_config.get("min_train_coverage")
+    min_val_coverage = split_config.get("min_val_coverage")
+    if require_full_test_coverage and min_test_coverage is None:
+        min_test_coverage = 1.0
+
+    for split_name, threshold in (
+        ("train", min_train_coverage),
+        ("val", min_val_coverage),
+        ("test", min_test_coverage),
+    ):
+        if threshold is None:
+            continue
+        threshold_f = float(threshold)
+        if _coverage(split_name) + 1e-12 < threshold_f:
+            reason = "split_indices coverage check failed after feature/label cleaning."
+            if split_name == "test" and require_full_test_coverage and float(threshold_f) >= 1.0:
+                reason = (
+                    "split.require_full_test_coverage=true but test membership changed after cleaning."
+                )
+            raise ValueError(
+                f"{reason} "
+                f"split={split_name} threshold={threshold_f:.2%} actual={_coverage(split_name):.2%} "
+                f"missing={missing_by_split[split_name]} "
+                f"(original={len(original_by_split[split_name])} filtered={len(filtered_by_split[split_name])}) "
+                "Featurizer/cleaning dropped rows; this run is not directly comparable."
+            )
 
     if not train_idx or not test_idx:
         raise ValueError(
@@ -911,12 +1496,21 @@ def _resolve_train_tdc_config(context: dict) -> dict:
     if not seeds:
         raise ValueError("train_tdc.seeds must contain at least one integer seed.")
 
+    model_cfg = train_tdc_config.get("model", {}) or {}
+    tuning_cfg = train_tdc_config.get("tuning", {}) or {}
+    early_cfg = train_tdc_config.get("early_stopping", {}) or {}
+    featurize_cfg = train_tdc_config.get("featurize", {}) or {}
+
     return {
         "group": group,
         "benchmarks": benchmarks,
         "split_type": split_type,
         "seeds": seeds,
         "path": str(train_tdc_config.get("path", context["base_dir"])),
+        "model": model_cfg,
+        "tuning": tuning_cfg,
+        "early_stopping": early_cfg,
+        "featurize": featurize_cfg,
     }
 
 
@@ -989,7 +1583,9 @@ def _morgan_features_from_smiles(
 
 
 def run_node_train_tdc(context: dict) -> None:
-    model_type = context["model_type"]
+    cfg = _resolve_train_tdc_config(context)
+    model_cfg = dict(cfg.get("model", {}) or {})
+    model_type = str(model_cfg.get("type", "")).strip()
     if context.get("task_type") != "classification":
         raise ValueError("train.tdc currently supports classification benchmarks only.")
     if model_type != "catboost_classifier":
@@ -998,8 +1594,7 @@ def run_node_train_tdc(context: dict) -> None:
             "Use the regular 'train' node for other models."
         )
 
-    cfg = _resolve_train_tdc_config(context)
-    featurize_config = context.get("featurize_config", {})
+    featurize_config = cfg.get("featurize", {}) or {}
     radius = int(featurize_config.get("radius", 2))
     n_bits = int(featurize_config.get("n_bits", 2048))
 
@@ -1020,8 +1615,10 @@ def run_node_train_tdc(context: dict) -> None:
     predictions_list: list[dict[str, list[float]]] = []
     seed_metric_rows: list[dict[str, object]] = []
 
-    model_config = dict(context.get("model_config", {}) or {})
+    model_config = dict(model_cfg)
     model_config["_debug_logging"] = context.get("debug_logging", False)
+    tuning_cfg = dict(cfg.get("tuning", {}) or {})
+    early_cfg = dict(cfg.get("early_stopping", {}) or {})
 
     for seed in cfg["seeds"]:
         seed_predictions: dict[str, list[float]] = {}
@@ -1072,12 +1669,12 @@ def run_node_train_tdc(context: dict) -> None:
                 y_test=y_test,
                 model_type=model_type,
                 output_dir=bench_out_dir,
-                random_state=int(seed),
-                cv_folds=int(model_config.get("cv_folds", 5)),
-                search_iters=int(model_config.get("search_iters", 100)),
-                use_hpo=_as_bool(model_config.get("use_hpo", False)),
-                hpo_trials=int(model_config.get("hpo_trials", 30)),
-                patience=int(model_config.get("patience", 20)),
+                random_state=_resolve_seed(context.get("global_random_state", 42), int(seed)),
+                cv_folds=int(tuning_cfg.get("cv_folds", 5)),
+                search_iters=int(tuning_cfg.get("search_iters", 100)),
+                use_hpo=_as_bool(tuning_cfg.get("use_hpo", False)),
+                hpo_trials=int(tuning_cfg.get("hpo_trials", 30)),
+                patience=int(early_cfg.get("patience", 20)),
                 task_type="classification",
                 model_config=model_config,
                 X_val=X_val,
@@ -1181,7 +1778,21 @@ def run_node_train(context: dict) -> None:
     target_column = context["target_column"]
     paths = context["paths"]
     task_type = context.get("task_type", "regression")
-    model_config = context.get("model_config", {})
+    train_config = context.get("train_config", {}) or {}
+    model_config = dict(context.get("model_config", {}) or {})
+    tuning_cfg = train_config.get("tuning", {}) if isinstance(train_config, dict) else {}
+    reporting_cfg = train_config.get("reporting", {}) if isinstance(train_config, dict) else {}
+    early_cfg = train_config.get("early_stopping", {}) if isinstance(train_config, dict) else {}
+    train_random_state = _resolve_seed(
+        context.get("global_random_state", 42),
+        train_config.get("random_state") if isinstance(train_config, dict) else None,
+    )
+    if "plot_split_performance" in reporting_cfg and "plot_split_performance" not in model_config:
+        model_config["plot_split_performance"] = _as_bool(
+            reporting_cfg.get("plot_split_performance", False)
+        )
+    if isinstance(tuning_cfg, dict):
+        model_config["tuning"] = dict(tuning_cfg)
     split_indices = context.get("split_indices")
     if not split_indices:
         raise ValueError(
@@ -1205,7 +1816,7 @@ def run_node_train(context: dict) -> None:
             target_column=target_column,
             split_indices=split_indices,
             output_dir=output_dir,
-            random_state=int(context.get("split_config", {}).get("random_state", 42)),
+            random_state=train_random_state,
             task_type=task_type,
             model_config=model_config,
         )
@@ -1268,9 +1879,9 @@ def run_node_train(context: dict) -> None:
     if not skip_quality_checks:
         data_preprocessing.verify_data_quality(X, y)
 
-    random_state = context.get("preprocess_config", {}).get("random_state", 42)
-    cv_folds = context.get("model_config", {}).get("cv_folds", 5)
-    search_iters = context.get("model_config", {}).get("search_iters", 100)
+    cv_folds = int(tuning_cfg.get("cv_folds", 5))
+    search_iters = int(tuning_cfg.get("search_iters", 100)
+    )
     X_val = None
     y_val = None
     partitions = _resolve_split_partitions(context, X.index)
@@ -1304,12 +1915,12 @@ def run_node_train(context: dict) -> None:
         y_test,
         model_type,
         output_dir,
-        random_state=random_state,
+        random_state=train_random_state,
         cv_folds=cv_folds,
         search_iters=search_iters,
-        use_hpo=model_config.get("use_hpo", False),
-        hpo_trials=model_config.get("hpo_trials", 30),
-        patience=model_config.get("patience", 20),
+        use_hpo=_as_bool(tuning_cfg.get("use_hpo", False)),
+        hpo_trials=int(tuning_cfg.get("hpo_trials", 30)),
+        patience=int(early_cfg.get("patience", 20)),
         task_type=task_type,
         model_config=train_model_config,
         X_val=X_val,
@@ -1474,6 +2085,7 @@ def run_configured_pipeline_nodes(config: dict, config_path: str) -> bool:
     if not nodes:
         return False
     validate_pipeline_nodes(nodes)
+    validate_config_strict(config, nodes)
 
     global_config = config.get("global")
     if not global_config:
@@ -1486,14 +2098,26 @@ def run_configured_pipeline_nodes(config: dict, config_path: str) -> bool:
     log_level = _resolve_log_level(global_config)
     _configure_logging(run_dir, level=log_level)
     debug_logging = _as_bool(global_config.get("debug", False)) or log_level <= logging.DEBUG
+    global_random_state = int(global_config.get("random_state", 42))
 
-    # If the pipeline uses curated tabular descriptors directly, keep all columns during curate
-    # so the downstream model has feature columns to train on.
-    keep_all_columns = config.get("preprocess", {}).get(
-        "keep_all_columns", config.get("keep_all_columns", False)
+    train_config = config.get("train", {}) or {}
+    train_features_config = train_config.get("features", {}) if isinstance(train_config, dict) else {}
+    model_config = train_config.get("model", {}) if isinstance(train_config, dict) else {}
+    train_tdc_config = config.get("train_tdc", {}) or {}
+    train_tdc_model_config = (
+        train_tdc_config.get("model", {}) if isinstance(train_tdc_config, dict) else {}
     )
+
+    # If the pipeline uses curated tabular descriptors directly, default to keep all columns.
+    keep_all_columns = _as_bool(config.get("curate", {}).get("keep_all_columns", False))
     if "use.curated_features" in nodes:
         keep_all_columns = True
+
+    model_type = None
+    if "train" in nodes:
+        model_type = model_config.get("type")
+    elif "train.tdc" in nodes:
+        model_type = train_tdc_model_config.get("type")
 
     context = {
         "config_path": config_path,
@@ -1504,16 +2128,18 @@ def run_configured_pipeline_nodes(config: dict, config_path: str) -> bool:
         "active_threshold": global_config["thresholds"]["active"],
         "inactive_threshold": global_config["thresholds"]["inactive"],
         "target_column": global_config.get("target_column", "pIC50"),
-        "model_type": config["model"]["type"],
+        "model_type": model_type,
+        "global_random_state": global_random_state,
         "get_data_config": config.get("get_data", {}),
         "curate_config": config.get("curate", {}),
         "preprocess_config": config.get("preprocess", {}),
         "split_config": config.get("split", {}),
         "featurize_config": config.get("featurize", {}),
         "label_config": config.get("label", {}),
-        "model_config": config.get("model", {}),
-        "train_tdc_config": config.get("train_tdc", config.get("train.tdc", {})),
-        "categorical_features": config.get("preprocess", {}).get("categorical_features", []),
+        "train_config": train_config,
+        "model_config": model_config,
+        "train_tdc_config": train_tdc_config,
+        "categorical_features": _as_str_list(train_features_config.get("categorical_features", [])),
         "keep_all_columns": keep_all_columns,
         "source": config.get("get_data", {}).get("source", {}),
         "run_dir": run_dir,
@@ -1549,7 +2175,7 @@ def main() -> int:
         # subprocess runs, force a hard exit on success to avoid false-negative e2e failures.
         if (
             os.environ.get("PYTEST_CURRENT_TEST")
-            and config.get("model", {}).get("type") == "chemprop"
+            and (config.get("train", {}) or {}).get("model", {}).get("type") == "chemprop"
         ):
             logging.shutdown()
             os._exit(0)

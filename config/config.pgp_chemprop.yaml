@@ -1,16 +1,16 @@
-# Pgp_Broccatelli pipeline (ADME classification) using Chemprop D-MPNN (optional dependency)
+# Pgp_Broccatelli pipeline (ADME classification) using Chemprop D-MPNN
 global:
   pipeline_type: adme
   task_type: classification
   base_dir: data/pgp_broccatelli
   target_column: label
+  random_state: 42
   thresholds:
     active: 1000
     inactive: 10000
   runs:
     enabled: true
 
-# Pipeline node order
 pipeline:
   nodes:
     - get_data
@@ -19,7 +19,6 @@ pipeline:
     - split
     - train
 
-# Node configs
 get_data:
   data_source: local_csv
   source:
@@ -51,19 +50,21 @@ split:
   random_state: 42
   stratify: true
 
-model:
-  type: chemprop
-  foundation: none
-  plot_split_performance: true
-  # To enable CheMeleon foundation initialization:
-  # foundation: chemeleon
-  # foundation_checkpoint: models/chemeleon_mp.pt
-  # freeze_encoder: false
-  smiles_column: canonical_smiles
-  params:
-    max_epochs: 30
-    batch_size: 64
-    max_lr: 0.001
-    mp_hidden_dim: 300
-    mp_depth: 3
-    ffn_hidden_dim: 300
+train:
+  model:
+    type: chemprop
+    foundation: none
+    # To enable CheMeleon foundation initialization:
+    # foundation: chemeleon
+    # foundation_checkpoint: models/chemeleon_mp.pt
+    # freeze_encoder: false
+    smiles_column: canonical_smiles
+    params:
+      max_epochs: 30
+      batch_size: 64
+      max_lr: 0.001
+      mp_hidden_dim: 300
+      mp_depth: 3
+      ffn_hidden_dim: 300
+  reporting:
+    plot_split_performance: true

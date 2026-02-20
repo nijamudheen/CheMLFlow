@@ -4,6 +4,25 @@ import logging
 
 from rdkit import Chem
 
+
+_DEDUPE_STRATEGY_ALIASES = {
+    "keep_first": "first",
+    "keep_last": "last",
+}
+_VALID_DEDUPE_STRATEGIES = {"first", "last", "drop_conflicts", "majority"}
+
+
+def _normalize_dedupe_strategy(dedupe_strategy: str | None) -> str | None:
+    if dedupe_strategy is None:
+        return None
+    normalized = str(dedupe_strategy).strip().lower()
+    normalized = _DEDUPE_STRATEGY_ALIASES.get(normalized, normalized)
+    if normalized not in _VALID_DEDUPE_STRATEGIES:
+        allowed = ", ".join(sorted(_VALID_DEDUPE_STRATEGIES | set(_DEDUPE_STRATEGY_ALIASES.keys())))
+        raise ValueError(f"Unsupported dedupe_strategy={dedupe_strategy!r}. Allowed values: {allowed}.")
+    return normalized
+
+
 class DataPreparer:
     def __init__(self, raw_data_file, preprocessed_file, curated_file, keep_all_columns=False):
         self.raw_data_file = raw_data_file
@@ -29,6 +48,7 @@ class DataPreparer:
         try:
             logging.info(f"Loading data from {self.raw_data_file}")
             df = pd.read_csv(self.raw_data_file)
+            dedupe_strategy = _normalize_dedupe_strategy(dedupe_strategy)
 
             # Detect the SMILES column
             candidate_smiles = [smiles_column] if smiles_column else [
@@ -54,10 +74,16 @@ class DataPreparer:
                 smiles_col = 'canonical_smiles'
 
             # Remove exact duplicates by SMILES text (pre-canonicalization)
-            if not dedupe_strategy or dedupe_strategy == "first":
+            if dedupe_strategy in {None, "first", "last"}:
                 before = len(df_clean)
-                df_clean = df_clean.drop_duplicates(subset=[smiles_col])
-                logging.info(f"Removed {before - len(df_clean)} duplicate rows based on '{smiles_col}'.")
+                keep = "last" if dedupe_strategy == "last" else "first"
+                df_clean = df_clean.drop_duplicates(subset=[smiles_col], keep=keep)
+                logging.info(
+                    "Removed %s duplicate rows based on '%s' (keep=%s).",
+                    before - len(df_clean),
+                    smiles_col,
+                    keep,
+                )
             else:
                 logging.info(
                     "Skipping pre-canonicalization dedupe because dedupe_strategy=%s.",
@@ -153,6 +179,7 @@ class DataPreparer:
         try:
             logging.info(f"Loading curated data from {self.curated_file}")
             df = pd.read_csv(self.curated_file)
+            dedupe_strategy = _normalize_dedupe_strategy(dedupe_strategy)
 
             if 'canonical_smiles' not in df.columns:
                 raise ValueError("Expected a 'canonical_smiles' column in curated data.")
@@ -243,8 +270,13 @@ class DataPreparer:
                     dropped,
                 )
             else:
-                df = df.drop_duplicates(subset=["canonical_smiles"])
-                logging.info(f"Removed {before - len(df)} duplicates after canonicalization.")
+                keep = "last" if dedupe_strategy == "last" else "first"
+                df = df.drop_duplicates(subset=["canonical_smiles"], keep=keep)
+                logging.info(
+                    "Removed %s duplicates after canonicalization (keep=%s).",
+                    before - len(df),
+                    keep,
+                )
 
             # Save cleaned SMILES to a separate file
             df[['canonical_smiles']].to_csv(curated_smiles_output, index=False)
@@ -275,6 +307,7 @@ def main(
 ):
     """Main function to preprocess, optionally label, and clean SMILES data."""
     logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+    dedupe_strategy = _normalize_dedupe_strategy(dedupe_strategy)
     preparer = DataPreparer(raw_data_file, preprocessed_file, curated_file, keep_all_columns=keep_all_columns)
     preparer.handle_missing_data_and_duplicates(
         smiles_column=smiles_column,
@@ -315,7 +348,7 @@ if __name__ == "__main__":
     parser.add_argument('--keep_all_columns', action='store_true',
                         help="If set, keep all columns (do not drop to only selected properties).")
     parser.add_argument('--dedupe_strategy', type=str, default=None,
-                        help="Duplicate handling after canonicalization: first|drop_conflicts|majority.")
+                        help="Duplicate handling strategy: keep_first|keep_last|first|last|drop_conflicts|majority.")
     parser.add_argument('--label_column', type=str, default=None,
                         help="Label column name for dedupe resolution (required for conflict handling).")
 

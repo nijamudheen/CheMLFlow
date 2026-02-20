@@ -36,10 +36,8 @@ split:
   random_state: 42
   stratify: false
 
-model:
-  type: random_forest
-  cv_folds: 3
-  search_iters: 50
-  use_hpo: true
-  hpo_trials: 30
-  patience: 20
+train:
+  model:
+    type: random_forest
+  early_stopping:
+    patience: 20

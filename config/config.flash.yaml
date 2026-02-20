@@ -29,20 +29,9 @@ curate:
   properties: "FP Exp."
   smiles_column: SMILES
   prefer_largest_fragment: true
+  keep_all_columns: true
 
 preprocess:
-  keep_all_columns: true
-  # Exclude known leakage/meta columns when training on experimental flash point.
-  exclude_columns:
-    - "FP Calc."
-    - "Std. Dev. (FP)"
-    - "CN Exp."
-    - "CN Calc."
-    - "Std. Dev. (CN)"
-    - "Set (FP)"
-    - "Set (CN)"
-  categorical_features:
-    - Family
   variance_threshold: 0.16
   corr_threshold: 0.95
   clip_range:
@@ -58,11 +47,22 @@ split:
   random_state: 42
   stratify: false
 
-model:
-  type: random_forest
-  cv_folds: 3
-  search_iters: 50
-  plot_split_performance: true
-  use_hpo: true
-  hpo_trials: 30
-  patience: 20
+train:
+  model:
+    type: random_forest
+  features:
+    # Exclude known leakage/meta columns when training on experimental flash point.
+    exclude_columns:
+      - "FP Calc."
+      - "Std. Dev. (FP)"
+      - "CN Exp."
+      - "CN Calc."
+      - "Std. Dev. (CN)"
+      - "Set (FP)"
+      - "Set (CN)"
+    categorical_features:
+      - Family
+  reporting:
+    plot_split_performance: true
+  early_stopping:
+    patience: 20

@@ -31,6 +31,7 @@ get_data:
 
 curate:
   properties: gap
+  keep_all_columns: true
 
 split:
   strategy: scaffold
@@ -40,7 +41,6 @@ split:
   stratify: false
 
 preprocess:
-  keep_all_columns: true
   variance_threshold: 0.16
   corr_threshold: 0.95
   clip_range:
@@ -49,10 +49,8 @@ preprocess:
   stable_features_k: 50
   random_state: 42
 
-model:
-  type: decision_tree
-  cv_folds: 3
-  search_iters: 50
-  use_hpo: true
-  hpo_trials: 30
-  patience: 20
+train:
+  model:
+    type: decision_tree
+  early_stopping:
+    patience: 20

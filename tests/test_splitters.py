@@ -163,3 +163,87 @@ def test_tdc_split_indices_supports_nested_strategy_payload(
     assert splits["train"] == expected_train
     assert splits["valid"] == expected_valid
     assert splits["test"] == expected_test
+
+
+def test_random_kfold_plan_reproducible():
+    y = np.array([0, 1] * 20)
+    plan_a = splitters.random_kfold_plan(
+        n_samples=40,
+        n_splits=5,
+        repeats=2,
+        random_state=123,
+        stratify=y,
+        dataset_fingerprint="abc",
+    )
+    plan_b = splitters.random_kfold_plan(
+        n_samples=40,
+        n_splits=5,
+        repeats=2,
+        random_state=123,
+        stratify=y,
+        dataset_fingerprint="abc",
+    )
+    assert plan_a == plan_b
+    assert plan_a["n_splits"] == 5
+    assert plan_a["repeats"] == 2
+
+    for repeat_payload in plan_a["repeat_plans"]:
+        all_test = set()
+        for fold in repeat_payload["folds"]:
+            test_idx = set(fold["test_indices"])
+            assert test_idx.isdisjoint(all_test)
+            all_test |= test_idx
+        assert all_test == set(range(40))
+
+
+@pytest.mark.skipif(splitters.Chem is None, reason="RDKit not installed")
+def test_scaffold_kfold_plan_prevents_scaffold_leakage():
+    smiles = [
+        "c1ccccc1",
+        "c1ccccc1O",
+        "c1ccccc1N",
+        "C1CCCCC1",
+        "CC1CCCCC1",
+        "OC1CCCCC1",
+        "c1ccncc1",
+        "Oc1ccncc1",
+        "Nc1ccncc1",
+    ]
+    plan = splitters.scaffold_kfold_plan(
+        smiles_list=smiles,
+        n_splits=3,
+        repeats=2,
+        random_state=42,
+        dataset_fingerprint="xyz",
+    )
+    assert plan["strategy"] == "scaffold"
+
+    all_idx = set(range(len(smiles)))
+    scaffold_by_idx = {i: splitters._scaffold_smiles(smi) or "" for i, smi in enumerate(smiles)}
+
+    for repeat_payload in plan["repeat_plans"]:
+        fold_tests = [set(fold["test_indices"]) for fold in repeat_payload["folds"]]
+        assert set().union(*fold_tests) == all_idx
+        for fold_idx, test_indices in enumerate(fold_tests):
+            train_indices = all_idx - test_indices
+            train_scaffolds = {scaffold_by_idx[i] for i in train_indices}
+            test_scaffolds = {scaffold_by_idx[i] for i in test_indices}
+            assert train_scaffolds.isdisjoint(test_scaffolds), f"Leak in fold {fold_idx}"
+
+
+@pytest.mark.skipif(splitters.Chem is None, reason="RDKit not installed")
+def test_scaffold_kfold_plan_rejects_more_splits_than_unique_scaffolds():
+    smiles = [
+        "c1ccccc1",
+        "c1ccccc1O",
+        "CCO",
+        "CCCO",
+    ]
+    with pytest.raises(ValueError, match="unique scaffolds"):
+        splitters.scaffold_kfold_plan(
+            smiles_list=smiles,
+            n_splits=3,
+            repeats=1,
+            random_state=7,
+            dataset_fingerprint="abc",
+        )

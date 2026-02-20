@@ -1,9 +1,12 @@
 import json
 import logging
+import hashlib
+import os
+import tempfile
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
-from sklearn.model_selection import ShuffleSplit, StratifiedShuffleSplit
+from sklearn.model_selection import KFold, ShuffleSplit, StratifiedKFold, StratifiedShuffleSplit
 
 try:
     from rdkit import Chem
@@ -68,6 +71,209 @@ def _build_canonical_index(smiles_list: Iterable[str]) -> Dict[str, List[int]]:
             continue
         index.setdefault(canonical, []).append(i)
     return index
+
+
+def _json_dump(payload: dict, output_path: str) -> None:
+    with open(output_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+
+
+def _normalize_index_list(indices: Iterable[int]) -> List[int]:
+    out = sorted({int(i) for i in indices})
+    return out
+
+
+def _validate_kfold_args(n_samples: int, n_splits: int, repeats: int) -> None:
+    if n_samples <= 1:
+        raise ValueError("k-fold requires at least 2 samples.")
+    if n_splits < 2:
+        raise ValueError(f"n_splits must be >= 2; got {n_splits!r}")
+    if n_splits > n_samples:
+        raise ValueError(
+            f"n_splits={n_splits} cannot exceed n_samples={n_samples}."
+        )
+    if repeats < 1:
+        raise ValueError(f"repeats must be >= 1; got {repeats!r}")
+
+
+def compute_dataset_fingerprint(
+    curated_df,
+    target_column: Optional[str] = None,
+) -> str:
+    """Create a deterministic dataset fingerprint for split plan provenance."""
+    hasher = hashlib.sha256()
+
+    if "canonical_smiles" in curated_df.columns:
+        smiles_series = curated_df["canonical_smiles"].fillna("").astype(str)
+    else:
+        smiles_series = curated_df.index.astype(str)
+
+    if target_column and target_column in curated_df.columns:
+        target_series = curated_df[target_column].fillna("").astype(str)
+    else:
+        target_series = ["" for _ in range(len(curated_df))]
+
+    for smi, tgt in zip(smiles_series.tolist(), list(target_series)):
+        canonical = _canonicalize_smiles(str(smi)) or str(smi)
+        hasher.update(canonical.encode("utf-8"))
+        hasher.update(b"\x1f")
+        hasher.update(str(tgt).encode("utf-8"))
+        hasher.update(b"\x1e")
+    return hasher.hexdigest()
+
+
+def save_split_plan(plan: Dict[str, object], output_path: str) -> None:
+    # Atomic write to avoid truncated/corrupt JSON under concurrent Slurm jobs.
+    output_dir = os.path.dirname(output_path) or "."
+    os.makedirs(output_dir, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(
+        prefix=".tmp_split_plan_",
+        suffix=".json",
+        dir=output_dir,
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(plan, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp_path, output_path)
+    finally:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+
+def load_split_plan(path: str) -> Dict[str, object]:
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def random_kfold_plan(
+    n_samples: int,
+    n_splits: int,
+    repeats: int,
+    random_state: int,
+    stratify: Optional[np.ndarray] = None,
+    dataset_fingerprint: Optional[str] = None,
+) -> Dict[str, object]:
+    _validate_kfold_args(n_samples=n_samples, n_splits=n_splits, repeats=repeats)
+    indices = np.arange(n_samples)
+    repeats_payload: List[Dict[str, object]] = []
+
+    for repeat_index in range(repeats):
+        seed = int(random_state) + int(repeat_index)
+        if stratify is not None:
+            splitter = StratifiedKFold(
+                n_splits=n_splits,
+                shuffle=True,
+                random_state=seed,
+            )
+            split_iter = splitter.split(indices, stratify)
+        else:
+            splitter = KFold(
+                n_splits=n_splits,
+                shuffle=True,
+                random_state=seed,
+            )
+            split_iter = splitter.split(indices)
+
+        folds: List[Dict[str, object]] = []
+        for fold_index, (_, test_pos) in enumerate(split_iter):
+            folds.append(
+                {
+                    "fold_index": int(fold_index),
+                    "test_indices": _normalize_index_list(indices[test_pos].tolist()),
+                }
+            )
+        repeats_payload.append(
+            {
+                "repeat_index": int(repeat_index),
+                "random_state": int(seed),
+                "folds": folds,
+            }
+        )
+
+    return {
+        "version": 1,
+        "plan_type": "kfold",
+        "strategy": "random",
+        "n_rows": int(n_samples),
+        "n_splits": int(n_splits),
+        "repeats": int(repeats),
+        "random_state": int(random_state),
+        "dataset_fingerprint": dataset_fingerprint,
+        "repeat_plans": repeats_payload,
+    }
+
+
+def scaffold_kfold_plan(
+    smiles_list: Iterable[str],
+    n_splits: int,
+    repeats: int,
+    random_state: int,
+    dataset_fingerprint: Optional[str] = None,
+) -> Dict[str, object]:
+    if Chem is None or MurckoScaffold is None:
+        raise RuntimeError("RDKit is required for scaffold k-fold splitting.")
+
+    smiles = list(smiles_list)
+    _validate_kfold_args(n_samples=len(smiles), n_splits=n_splits, repeats=repeats)
+    scaffold_groups: Dict[str, List[int]] = {}
+    for idx, smi in enumerate(smiles):
+        scaffold = _scaffold_smiles(str(smi))
+        scaffold_groups.setdefault(scaffold or "", []).append(idx)
+    n_groups = len(scaffold_groups)
+    if n_splits > n_groups:
+        raise ValueError(
+            f"scaffold_kfold requires n_splits <= unique scaffolds; got n_splits={n_splits} "
+            f"but unique_scaffolds={n_groups}."
+        )
+    group_items = list(scaffold_groups.items())
+    repeats_payload: List[Dict[str, object]] = []
+
+    for repeat_index in range(repeats):
+        seed = int(random_state) + int(repeat_index)
+        rng = np.random.RandomState(seed)
+        shuffled = list(group_items)
+        rng.shuffle(shuffled)
+        shuffled.sort(key=lambda item: len(item[1]), reverse=True)
+
+        fold_bins: List[List[int]] = [[] for _ in range(n_splits)]
+        fold_sizes = [0 for _ in range(n_splits)]
+        for _, grp_indices in shuffled:
+            smallest = int(np.argmin(fold_sizes))
+            fold_bins[smallest].extend(grp_indices)
+            fold_sizes[smallest] += len(grp_indices)
+
+        folds: List[Dict[str, object]] = []
+        for fold_index, test_indices in enumerate(fold_bins):
+            folds.append(
+                {
+                    "fold_index": int(fold_index),
+                    "test_indices": _normalize_index_list(test_indices),
+                }
+            )
+        repeats_payload.append(
+            {
+                "repeat_index": int(repeat_index),
+                "random_state": int(seed),
+                "folds": folds,
+            }
+        )
+
+    return {
+        "version": 1,
+        "plan_type": "kfold",
+        "strategy": "scaffold",
+        "n_rows": int(len(smiles)),
+        "n_splits": int(n_splits),
+        "repeats": int(repeats),
+        "random_state": int(random_state),
+        "dataset_fingerprint": dataset_fingerprint,
+        "repeat_plans": repeats_payload,
+    }
 
 
 def random_split_indices(
@@ -156,20 +362,45 @@ def scaffold_split_indices(
     groups.sort(key=len, reverse=True)
 
     n_samples = len(smiles)
+    if n_samples <= 1:
+        raise ValueError("Scaffold split requires at least 2 samples.")
+    if test_size < 0 or val_size < 0:
+        raise ValueError("test_size and val_size must be non-negative.")
+    if test_size + val_size >= 1.0:
+        raise ValueError("test_size + val_size must be < 1.0.")
     n_test = int(round(test_size * n_samples))
     n_val = int(round(val_size * n_samples))
+    if test_size > 0 and n_test == 0:
+        n_test = 1
+    if val_size > 0 and n_val == 0:
+        n_val = 1
+    if n_test + n_val >= n_samples:
+        raise ValueError(
+            f"Requested split sizes leave no training data for n_samples={n_samples}: "
+            f"n_test={n_test}, n_val={n_val}."
+        )
 
-    train_idx: List[int] = []
-    val_idx: List[int] = []
-    test_idx: List[int] = []
+    train_groups: List[List[int]] = []
+    val_groups: List[List[int]] = []
+    test_groups: List[List[int]] = []
+    train_count = 0
+    val_count = 0
+    test_count = 0
 
     for group in groups:
-        if len(test_idx) + len(group) <= n_test:
-            test_idx.extend(group)
-        elif len(val_idx) + len(group) <= n_val:
-            val_idx.extend(group)
+        if test_count + len(group) <= n_test:
+            test_groups.append(group)
+            test_count += len(group)
+        elif val_count + len(group) <= n_val:
+            val_groups.append(group)
+            val_count += len(group)
         else:
-            train_idx.extend(group)
+            train_groups.append(group)
+            train_count += len(group)
+
+    train_idx = [idx for group in train_groups for idx in group]
+    val_idx = [idx for group in val_groups for idx in group]
+    test_idx = [idx for group in test_groups for idx in group]
 
     return {"train": train_idx, "val": val_idx, "test": test_idx}
 
@@ -220,8 +451,7 @@ def tdc_split_indices(
 
 
 def save_split_indices(split_indices: Dict[str, List[int]], output_path: str) -> None:
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(split_indices, f, indent=2)
+    _json_dump(split_indices, output_path)
 
 
 def build_split_indices(

@@ -2,6 +2,8 @@ import json
 import os
 import logging
 import shutil
+import inspect
+import random
 from dataclasses import dataclass
 from typing import Tuple, Dict, Any, Callable
 
@@ -983,8 +985,10 @@ def _run_optuna(
                     name, spec["low"], spec["high"], log=spec.get("log", False)
                 )
         
+        trial_seed = int(random_state) + int(trial.number) + 1
+        _seed_dl_runtime(trial_seed)
         model = config.model_class(params)
-        
+
         # Train
         result = _train_dl(
             model=model,
@@ -996,6 +1000,7 @@ def _run_optuna(
             batch_size=int(params.get("batch_size", 32)),
             learning_rate=float(params.get("learning_rate", 1e-3)),
             patience=patience,
+            random_state=trial_seed,
             task_type=task_type
         )
         
@@ -1063,7 +1068,14 @@ def _initialize_model(
     search_iters: int,
     input_dim: int = None,
     n_jobs: int = -1,
+    tuning_method: str = "fixed",
+    model_params: Dict[str, Any] | None = None,
 ):
+    tuning_method = str(tuning_method or "fixed").strip().lower()
+    if tuning_method not in {"train_cv", "fixed"}:
+        raise ValueError(f"Unsupported model.tuning.method={tuning_method!r}; expected 'train_cv' or 'fixed'.")
+    model_params = model_params or {}
+
     if model_type == "random_forest":
         param_dist = {
             "n_estimators": [int(x) for x in np.linspace(start=100, stop=1000, num=10)],
@@ -1073,6 +1085,10 @@ def _initialize_model(
             "max_features": ["sqrt", "log2", None],
             "bootstrap": [True, False],
         }
+        if tuning_method == "fixed":
+            params = {"random_state": random_state, **model_params}
+            params.setdefault("n_jobs", n_jobs)
+            return RandomForestRegressor(**params)
         base_rf = RandomForestRegressor(random_state=random_state)
         return RandomizedSearchCV(
             estimator=base_rf,
@@ -1089,6 +1105,8 @@ def _initialize_model(
             "gamma": ["scale", "auto", 0.1, 0.01],
             "epsilon": [0.1, 0.2, 0.5],
         }
+        if tuning_method == "fixed":
+            return SVR(**model_params)
         return GridSearchCV(
             estimator=SVR(kernel="rbf"),
             param_grid=param_grid_svm,
@@ -1103,6 +1121,9 @@ def _initialize_model(
             "min_samples_leaf": [1, 2, 4, 8],
             "max_features": ["sqrt", "log2", None],
         }
+        if tuning_method == "fixed":
+            params = {"random_state": random_state, **model_params}
+            return DecisionTreeRegressor(**params)
         base_dt = DecisionTreeRegressor(random_state=random_state)
         return RandomizedSearchCV(
             estimator=base_dt,
@@ -1123,7 +1144,19 @@ def _initialize_model(
             "reg_alpha": [0, 0.01, 0.1, 1],
             "reg_lambda": [0.1, 1, 10, 100],
         }
-        base_xgb = XGBRegressor(objective="reg:squarederror", random_state=random_state)
+        if tuning_method == "fixed":
+            params = {
+                "objective": "reg:squarederror",
+                "random_state": random_state,
+                "n_jobs": n_jobs,
+                **model_params,
+            }
+            return XGBRegressor(**params)
+        base_xgb = XGBRegressor(
+            objective="reg:squarederror",
+            random_state=random_state,
+            n_jobs=n_jobs,
+        )
         return RandomizedSearchCV(
             estimator=base_xgb,
             param_distributions=param_dist_xgb,
@@ -1152,25 +1185,42 @@ def _initialize_model(
             reg_alpha=0,
             reg_lambda=1,
             random_state=random_state,
+            n_jobs=n_jobs,
         )
         return VotingRegressor([("rf", rf), ("xgb", xgb)], n_jobs=n_jobs)
     
     if model_type == "dl_simple":
         if input_dim is None:
             raise ValueError("input_dim required for DL models")
-        from DLModels.simplenn import SimpleNN
+        try:
+            from DLModels.simplenn import SimpleNN
+        except Exception:
+            # Backward compatibility for repos that still expose the legacy module/class.
+            from DLModels.simpleregressionnn import SimpleRegressionNN as SimpleNN
+
+        simple_params = inspect.signature(SimpleNN).parameters
+
+        def _make_simple_model(params: Dict[str, Any]):
+            kwargs = {
+                "input_dim": input_dim,
+                "hidden_dim": params.get("hidden_dim", 256),
+            }
+            if "use_tropical" in simple_params:
+                kwargs["use_tropical"] = params.get("use_tropical", False)
+            return SimpleNN(**kwargs)
+
         return DLSearchConfig(
-            model_class=lambda params: SimpleNN(
-                input_dim=input_dim,
-                hidden_dim=params.get("hidden_dim", 256),
-                use_tropical=params.get("use_tropical", False),
-            ),
+            model_class=_make_simple_model,
             search_space={
                 "hidden_dim": {"type": "categorical", "choices": [64, 128, 256, 512]},
                 "learning_rate": {"type": "float", "low": 1e-5, "high": 1e-2, "log": True},
                 "batch_size": {"type": "categorical", "choices": [16, 32, 64, 128]},
                 "epochs": {"type": "categorical", "choices": [100, 200, 300]},
-                "use_tropical": {"type": "categorical", "choices": [True, False]},
+                **(
+                    {"use_tropical": {"type": "categorical", "choices": [True, False]}}
+                    if "use_tropical" in simple_params
+                    else {}
+                ),
             },
             default_params={
                 "hidden_dim": 256,
@@ -1338,6 +1388,27 @@ def _initialize_model(
 def _get_device():
     import torch
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def _seed_dl_runtime(seed: int) -> None:
+    """Seed Python/NumPy/PyTorch for deterministic DL training."""
+    random.seed(int(seed))
+    np.random.seed(int(seed))
+    import torch
+
+    torch.manual_seed(int(seed))
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(int(seed))
+    if hasattr(torch.backends, "cudnn"):
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    if hasattr(torch, "use_deterministic_algorithms"):
+        try:
+            torch.use_deterministic_algorithms(True, warn_only=True)
+        except TypeError:
+            torch.use_deterministic_algorithms(True)
+
+
 def _is_dl_model(model_type: str) -> bool:
     return model_type.startswith("dl_")
 def _train_dl(
@@ -1350,6 +1421,7 @@ def _train_dl(
     batch_size: int,
     learning_rate: float,
     patience: int,
+    random_state: int = 42,
     task_type: str = "regression",
     ) -> Dict[str, Any]:
     """Train a PyTorch model. Returns dict with model and best_params."""
@@ -1376,7 +1448,14 @@ def _train_dl(
         y_val_t = torch.tensor(np.asarray(y_val).reshape(-1, 1), dtype=torch.float32, device=device)
         criterion = nn.MSELoss()
     
-    loader = DataLoader(TensorDataset(X_t, y_t), batch_size=batch_size, shuffle=True)
+    dl_generator = torch.Generator()
+    dl_generator.manual_seed(int(random_state))
+    loader = DataLoader(
+        TensorDataset(X_t, y_t),
+        batch_size=batch_size,
+        shuffle=True,
+        generator=dl_generator,
+    )
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
     # criterion = nn.MSELoss()
     
@@ -1460,11 +1539,20 @@ def train_model(
     plot_split_performance = _as_bool(model_config.get("plot_split_performance", False))
     debug_logging = _as_bool(model_config.get("_debug_logging", False))
     n_jobs = _resolve_n_jobs(model_config)
+    tuning_cfg = model_config.get("tuning", {}) if isinstance(model_config.get("tuning"), dict) else {}
+    tuning_method = str(
+        tuning_cfg.get(
+            "method",
+            model_config.get("tuning_method", "fixed"),
+        )
+    ).strip().lower() or "fixed"
+    model_params = model_config.get("params", {}) if isinstance(model_config.get("params"), dict) else {}
 
     logging.info(
-        "Training start: model=%s task=%s X_train=%s X_test=%s",
+        "Training start: model=%s task=%s tuning=%s X_train=%s X_test=%s",
         model_type,
         task_type,
+        tuning_method,
         X_train.shape,
         X_test.shape,
     )
@@ -1587,6 +1675,8 @@ def train_model(
         search_iters,
         input_dim=X_train.shape[1] if is_dl else None,
         n_jobs=n_jobs,
+        tuning_method=tuning_method,
+        model_params=model_params,
     )
     if isinstance(model, DLSearchConfig):
         # ── DL Training ──
@@ -1610,6 +1700,7 @@ def train_model(
             )
         else:
             logging.info(f"Training DL model: {model_type} (default params)")
+            _seed_dl_runtime(int(random_state))
             nn_model = model.model_class(model.default_params)
             result = _train_dl(
                 nn_model,
@@ -1621,6 +1712,7 @@ def train_model(
                 batch_size=model.default_params["batch_size"],
                 learning_rate=model.default_params["learning_rate"],
                 patience=patience,
+                random_state=random_state,
                 task_type=task_type,
             )
             estimator = result["model"]

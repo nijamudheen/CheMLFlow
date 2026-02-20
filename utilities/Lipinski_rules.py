@@ -29,10 +29,12 @@ class LipinskiRuleEvaluator:
         """Compute Lipinski descriptors for a list of SMILES."""
         try:
             logging.info("Computing Lipinski descriptors.")
-            mol_data = [Chem.MolFromSmiles(smile) for smile in smiles if smile is not None]
-            
             descriptors_list = []
-            for mol in mol_data:
+            for smile in smiles:
+                if smile is None or pd.isna(smile):
+                    descriptors_list.append([np.nan, np.nan, np.nan, np.nan])
+                    continue
+                mol = Chem.MolFromSmiles(str(smile))
                 if mol is not None:
                     desc_MW = Descriptors.MolWt(mol)
                     desc_LogP = Descriptors.MolLogP(mol)
@@ -44,6 +46,8 @@ class LipinskiRuleEvaluator:
 
             columns = ["MolecularWeight", "LogP", "HydrogenDonors", "HydrogenAcceptors"]
             descriptors_df = pd.DataFrame(descriptors_list, columns=columns)
+            if len(descriptors_df) != len(smiles):
+                raise ValueError("Lipinski descriptor row count must match input SMILES row count.")
             logging.info("Lipinski descriptors computation completed.")
             return descriptors_df
         except Exception as e:

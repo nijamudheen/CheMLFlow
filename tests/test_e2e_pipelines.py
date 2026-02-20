@@ -82,11 +82,10 @@ def test_e2e_qm9_fast(tmp_path: Path) -> None:
             "random_state": 42,
             "stratify": False,
         },
-        "model": {
-            "type": "decision_tree",
-            "cv_folds": 2,
-            "search_iters": 5,
-            "use_hpo": False,
+        "train": {
+            "model": {
+                "type": "decision_tree",
+            },
         },
     }
 
@@ -134,15 +133,17 @@ def test_e2e_ara_fast(tmp_path: Path) -> None:
             "stratify": True,
         },
         "featurize": {"radius": 2, "n_bits": 128},
-        "model": {
-            "type": "catboost_classifier",
-            "params": {
-                "depth": 4,
-                "learning_rate": 0.1,
-                "iterations": 10,
-                "loss_function": "Logloss",
-                "eval_metric": "AUC",
-                "verbose": False,
+        "train": {
+            "model": {
+                "type": "catboost_classifier",
+                "params": {
+                    "depth": 4,
+                    "learning_rate": 0.1,
+                    "iterations": 10,
+                    "loss_function": "Logloss",
+                    "eval_metric": "AUC",
+                    "verbose": False,
+                },
             },
         },
     }
@@ -191,15 +192,17 @@ def test_e2e_pgp_fast(tmp_path: Path) -> None:
             "stratify": True,
         },
         "featurize": {"radius": 2, "n_bits": 128},
-        "model": {
-            "type": "catboost_classifier",
-            "params": {
-                "depth": 4,
-                "learning_rate": 0.1,
-                "iterations": 10,
-                "loss_function": "Logloss",
-                "eval_metric": "AUC",
-                "verbose": False,
+        "train": {
+            "model": {
+                "type": "catboost_classifier",
+                "params": {
+                    "depth": 4,
+                    "learning_rate": 0.1,
+                    "iterations": 10,
+                    "loss_function": "Logloss",
+                    "eval_metric": "AUC",
+                    "verbose": False,
+                },
             },
         },
     }
@@ -249,16 +252,20 @@ def test_e2e_pgp_chemprop_fast(tmp_path: Path) -> None:
             "random_state": 42,
             "stratify": True,
         },
-        "model": {
-            "type": "chemprop",
-            "plot_split_performance": True,
-            "params": {
-                "max_epochs": 2,
-                "batch_size": 16,
-                "max_lr": 1e-3,
-                "mp_hidden_dim": 64,
-                "ffn_hidden_dim": 64,
-                "mp_depth": 2,
+        "train": {
+            "model": {
+                "type": "chemprop",
+                "params": {
+                    "max_epochs": 2,
+                    "batch_size": 16,
+                    "max_lr": 1e-3,
+                    "mp_hidden_dim": 64,
+                    "ffn_hidden_dim": 64,
+                    "mp_depth": 2,
+                },
+            },
+            "reporting": {
+                "plot_split_performance": True,
             },
         },
     }
@@ -308,13 +315,13 @@ def test_e2e_flash_fast(tmp_path: Path) -> None:
             "random_state": 42,
             "stratify": False,
         },
-        "preprocess": {
-            "categorical_features": ["Family"],
-        },
-        "model": {
-            "type": "random_forest",
-            "cv_folds": 2,
-            "search_iters": 5,
+        "train": {
+            "model": {
+                "type": "random_forest",
+            },
+            "features": {
+                "categorical_features": ["Family"],
+            },
         },
     }
 
@@ -351,11 +358,10 @@ def test_e2e_ysi_fast(tmp_path: Path) -> None:
             "random_state": 42,
             "stratify": False,
         },
-        "model": {
-            "type": "decision_tree",
-            "cv_folds": 2,
-            "search_iters": 5,
-            "use_hpo": False,
+        "train": {
+            "model": {
+                "type": "decision_tree",
+            },
         },
     }
 
@@ -392,11 +398,10 @@ def test_e2e_pah_fast(tmp_path: Path) -> None:
             "random_state": 42,
             "stratify": False,
         },
-        "model": {
-            "type": "decision_tree",
-            "cv_folds": 2,
-            "search_iters": 5,
-            "use_hpo": False,
+        "train": {
+            "model": {
+                "type": "decision_tree",
+            },
         },
     }
 

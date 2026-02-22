@@ -16,6 +16,5 @@ install:
 
 # Clean build artifacts
 clean:
-	rm -rf build dist *.egg-info
-
+	rm -rf build dist *.egg-info config/generated runs
 

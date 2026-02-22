@@ -276,6 +276,23 @@ Coverage/comparability controls:
 - `split.min_test_coverage`, `split.min_train_coverage`, `split.min_val_coverage` set explicit thresholds
 - This protects model comparisons from "winning by dropping hard rows"
 
+### DOE config generation
+
+You can generate many runnable configs from one DOE YAML:
+
+```bash
+python scripts/generate_doe.py --doe config/doe.example.yaml
+```
+
+The generator expands your search space and writes:
+
+- one config YAML per valid case
+- `manifest.jsonl` (valid/skipped + reason codes)
+- `summary.json` (counts + selection metadata)
+- isolated case paths by default (`base_dir`/`run_dir` scoped per `case_id`)
+
+Details and schema are in `docs/doe.md`.
+
 ## Quick start (pipelines)
 
 All pipelines are config-driven. You select the pipeline by setting `CHEMLFLOW_CONFIG`

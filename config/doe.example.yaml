@@ -1,0 +1,35 @@
+version: 1
+
+# dataset: fixed facts about your data (do not vary these in the grid)
+dataset:
+  task_type: regression
+  target_column: "FP Exp."
+  source:
+    type: local_csv
+    path: local_data/flash_dataset.csv
+  smiles_column: SMILES
+
+# defaults: applied to every generated case
+defaults:
+  global.base_dir: data/flash_doe
+  global.random_state: 42
+  global.runs.enabled: true
+  split.mode: holdout
+  split.test_size: 0.2
+  split.val_size: 0.1
+  train.tuning.method: fixed
+
+# search_space: only the fields you want to vary (grid axes)
+search_space:
+  split.strategy: [random, scaffold]
+  train.model.type: [random_forest, xgboost]
+  pipeline.feature_input: [use.curated_features, featurize.rdkit]
+
+# output: where generated config files + manifest/summary are written
+output:
+  dir: config/generated/flash_doe
+
+# constraints: optional generation/runtime safety limits
+constraints:
+  # true by default: each generated case gets unique base_dir/run_dir/id
+  isolate_case_artifacts: true

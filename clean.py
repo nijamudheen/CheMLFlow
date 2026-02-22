@@ -58,6 +58,14 @@ def main() -> int:
 
     # Known outputs
     remove_path(base_dir, args.dry_run)
+    global_cfg = config.get("global") if isinstance(config.get("global"), dict) else {}
+    run_dir_value = config.get("run_dir")
+    if run_dir_value is None:
+        run_dir_value = global_cfg.get("run_dir")
+    if run_dir_value:
+        remove_path(Path(str(run_dir_value)), args.dry_run)
+    remove_path(Path("runs"), args.dry_run)
+    remove_path(Path("config") / "generated", args.dry_run)
     remove_path(Path("results"), args.dry_run)
     remove_path(Path("urease"), args.dry_run)
 

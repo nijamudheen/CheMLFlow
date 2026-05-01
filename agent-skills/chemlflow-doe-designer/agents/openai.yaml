@@ -1,0 +1,4 @@
+interface:
+  display_name: "CheMLFlow DOE Designer"
+  short_description: "Design and review CheMLFlow DOE specs."
+  default_prompt: "Use this skill to design or review a CheMLFlow DOE YAML for compatibility, manifest shape, and scientific validity."

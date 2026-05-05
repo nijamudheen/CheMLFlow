@@ -34,81 +34,8 @@ train:
 
 ## Installation
 
-1. Clone the repository
-
-    git clone https://github.com/nijamudheen/CheMLFlow.git
-
-2. Create conda environment (Python 3.12 recommended)
-
-    cd CheMLFlow
-
-    conda create -n chemlflow_env python=3.12
-
-    conda activate chemlflow_env
-
-3. Install dependencies (macOS‑reliable, single path)
-
-- Install compiled deps from conda-forge first:
-
-  conda install -c conda-forge numpy scipy scikit-learn matplotlib-base seaborn lightgbm xgboost catboost rdkit shap numba llvmlite
-
-- Then install Python deps from pip (don’t re-resolve compiled libs):
-
-  pip install -r requirements.txt --no-deps
-
-Notes:
-- CatBoost is stable on Python 3.12. Python 3.13 often lacks wheels.
-- SHAP relies on numba/llvmlite. On macOS, conda-forge is the most reliable install path.
-- If `conda activate` fails, run `conda init zsh` once and restart your terminal (or `exec zsh`).
-- Run commands from the repo root (`CheMLFlow/`) so relative paths resolve.
-- If you see NumPy binary incompat errors after pip installs, reinstall numpy/numba/llvmlite/rdkit from conda-forge.
-- `pytdc` is optional and is not installed by `requirements.txt`.
-
-4. Optional: Install PyTorch + Optuna for DL models
-
-- For Linux/Windows (check for cuda version available. for instance, cu121 here)
-
-  pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
-
-  pip install pytorch-lightning
-
-  pip install optuna
-
-- For AMD GPU (ROCm, Linux only)
-
-  pip install torch torchvision --index-url https://download.pytorch.org/whl/rocm6.0
-
-  pip install pytorch-lightning
-
-  pip install optuna
-
-- For Apple Silicon (M1/M2/M3), no CUDA/GPU available 
-
-  Can use the MPS backend (built into the default macOS wheels) when using mps as the device
- 
-  pip install torch torchvision torchaudio
-
-  pip install pytorch-lightning 
-
-  pip install optuna
-
-5. Optional: Install TDC (`pytdc`) to access datasets from Therapeutic Data Commons (e.g, PGP dataset) 
-
-  - Install in your active environment:
-
-    pip install pytdc
-
-- Quick import check:
-
-  python -c "from tdc.benchmark_group import admet_group; print('pytdc ok')"
-
-Troubleshooting:
-- To keep the main env frozen after `pip install -r requirements.txt --no-deps`, use a small separate env for `pytdc` export tasks.
-- If import errors mention `huggingface_hub`, install/upgrade it in that same env: `pip install -U huggingface_hub`
-
-6. Remove additional install files
-
-    make clean
+See [docs/installation.md](docs/installation.md) for the recommended conda-based source install,
+developer install, optional deep-learning dependencies, and TDC dataset support.
 
 ## Quickstart
 
@@ -136,7 +63,7 @@ CHEMLFLOW_CONFIG=<path-to-runtime-config.yaml> python main.py
 
 Note:
 - Runtime config files are user-provided in this repo. Build one from `docs/config-options.md`
-  (or generate a batch from DOE via `scripts/generate_doe.py`).
+  or define an experiment batch with [docs/doe.md](docs/doe.md).
 
 Outputs:
 - If `global.runs.enabled: true`, results go to `runs/<timestamp>/`

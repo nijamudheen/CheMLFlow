@@ -1,7 +1,7 @@
 # Quickstart
 
-To get started with CheMLFlow, first install the package using the instructions in the
-[Installation](../README.md#installation) section. Once CheMLFlow is installed, you can train a
+To get started with CheMLFlow, first install the package using the
+[Installation](installation.md) guide. Once CheMLFlow is installed, you can train a
 model on your own data or use the small bundled regression dataset to get a feel for the package.
 
 Let's use the regression data that comes packaged with the training examples:
@@ -90,7 +90,7 @@ In the rest of the documentation, we'll go into more detail about how to:
 
 ## Summary
 
-- Install CheMLFlow using the instructions in the [Installation](../README.md#installation) section.
+- Install CheMLFlow using the [Installation](installation.md) guide.
 - Train a model with `python -m MLModels.training.cli train --data-path <input_path> --target-column <target> --model-type <model> --task-type <task> --output-dir <dir>`.
 - Use a saved model for prediction with `python -m MLModels.training.cli predict --test-path <test_path> --target-column <target> --model-path <model_path> --model-type <model> --preds-path <path>`.
 - Use DOE configs for full pipeline experiments across feature inputs, split strategies, and model families.

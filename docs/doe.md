@@ -1,26 +1,151 @@
-# DOE Config Generation
+# Design of Experiments
 
-CheMLFlow supports generating many **runtime-valid** configs from one DOE YAML file.
-The generator expands your search space, filters invalid combinations, and writes:
+Design of Experiments (DOE) is the CheMLFlow layer for defining a set of
+scientific comparisons before you run them. A DOE file describes the dataset,
+the evaluation policy, the model and featurization axes to compare, and the
+output location. CheMLFlow expands that design into runtime configs, filters
+known-invalid combinations, and records enough metadata to audit what was run.
 
-- `manifest.jsonl` (one row per attempted execution child, including skipped reasons)
-- `parent_manifest.jsonl` (one row per scientific parent config)
-- `summary.json` (counts, profile/task, selection metadata, DOE spec hash/snapshot path, git provenance)
-- one config YAML per valid case
+Use DOE when you want to compare models, featurizers, split strategies, or CV
+folds under one consistent policy. The point is not only to make many configs
+quickly; it is to make the experiment easier to trust. A good DOE keeps train,
+validation, and test policy consistent, prevents hand-edited config drift, keeps
+artifacts separated, and preserves the reasons that cases were skipped.
 
-Script:
+## Minimal Workflow
+
+Start from the example DOE file:
+
+```text
+config/doe.example.yaml
+```
+
+Set at least:
+
+- `dataset.source.path`
+- `dataset.target_column`
+- `dataset.smiles_column` for local CSV datasets
+- the `search_space` values you want to compare
+- `output.dir`
+
+For real experiments, use a fresh `output.dir` for each DOE run. If you are
+rerunning the tutorial output and do not need the old generated files, clean it
+first:
 
 ```bash
+rm -rf config/generated/flash_doe
+```
+
+Generate the DOE configs:
+
+```bash
+conda activate chemlflow_env
 python scripts/generate_doe.py --doe config/doe.example.yaml
 ```
 
-## Why this exists
+Inspect the generated design:
 
-- Keeps split/evaluation policy consistent across models.
-- Prevents known invalid combinations from reaching cluster jobs.
-- Produces auditable case metadata (`status`, `issues`, `config_hash`).
+```bash
+cat config/generated/flash_doe/summary.json
+head -n 20 config/generated/flash_doe/manifest.jsonl
+head -n 20 config/generated/flash_doe/parent_manifest.jsonl
+ls config/generated/flash_doe/*.yaml
+```
 
-## Supported profiles
+Run one generated case:
+
+```bash
+CHEMLFLOW_CONFIG=config/generated/flash_doe/<case_file>.yaml python main.py
+```
+
+Use the `config_path` values in `manifest.jsonl` or `ls` output rather than
+assuming a specific generated filename.
+
+## DOE YAML Shape
+
+Top-level keys:
+
+- `version`: must be `1`
+- `dataset`: fixed facts about the data
+- `defaults`: fixed runtime settings applied to every case
+- `search_space`: experiment axes to vary
+- `constraints`: generation and artifact-safety settings
+- `selection`: metric preference metadata
+- `output`: generated artifact location
+
+Typical local CSV DOE:
+
+```yaml
+version: 1
+
+dataset:
+  task_type: regression
+  target_column: label
+  smiles_column: SMILES
+  source:
+    type: local_csv
+    path: local_data/my_data.csv
+
+defaults:
+  global.base_dir: data/my_doe
+  global.random_state: 42
+  global.runs.enabled: true
+  split.mode: holdout
+  split.test_size: 0.2
+  split.val_size: 0.1
+  train.tuning.method: fixed
+
+search_space:
+  train.model.type: [random_forest, xgboost]
+  split.strategy: [random, scaffold]
+  pipeline.feature_input: [featurize.rdkit, featurize.morgan]
+
+constraints:
+  isolate_case_artifacts: true
+
+output:
+  dir: config/generated/my_doe
+```
+
+`search_space` and `defaults` use dotted paths. Scalar values are treated as
+single-value axes; lists expand into a grid.
+
+## Generated Artifacts
+
+DOE generation writes these files into `output.dir`:
+
+- `summary.json`: counts, profile/task, selection metadata, DOE spec hash,
+  snapshot path, and git provenance
+- `manifest.jsonl`: one row per attempted execution child, including skipped
+  cases and issue codes
+- `parent_manifest.jsonl`: one row per scientific parent config
+- `*.yaml`: one runnable runtime config per valid execution child
+- `doe_spec.input.yaml`: the exact DOE spec snapshot used for generation
+
+Generated runtime configs are case-isolated by default. CheMLFlow scopes
+`global.base_dir` and `global.run_dir` under the DOE spec hash and `case_id`, and
+sets `global.runs.id` to the case id. Leave
+`constraints.isolate_case_artifacts: true` unless you intentionally want shared
+artifacts.
+
+## Parent And Child Cases
+
+DOE separates the scientific comparison from execution slices:
+
+- A parent case is the logical scientific config, such as one model,
+  featurizer, and split strategy.
+- A child case is one concrete execution, such as a specific CV fold and repeat.
+- Holdout designs usually have one child per parent.
+- CV and nested designs can have many children per parent.
+
+For `split.mode: cv` or `nested_holdout_cv`, keep `split.cv.n_splits` and
+`split.cv.repeats` in `defaults`. If fold and repeat indices are omitted, DOE
+expands all folds and repeats automatically. Set fold or repeat indices only
+when debugging or rerunning a specific execution slice.
+
+## Supported Profiles
+
+Supported profiles are:
 
 - `reg_local_csv`
 - `reg_local_csv_ic50`
@@ -28,186 +153,78 @@ python scripts/generate_doe.py --doe config/doe.example.yaml
 - `clf_local_csv`
 - `clf_tdc_benchmark`
 
-If `dataset.profile` is omitted, the generator infers a profile from:
+If `dataset.profile` is omitted, CheMLFlow infers it from
+`dataset.task_type` and `dataset.source.type`. For `task_type: auto`, set
+`dataset.auto_confirmed: true`.
 
-- `dataset.task_type`
-- `dataset.source.type`
+## Correctness Checks
 
-For `task_type: auto`, set `dataset.auto_confirmed: true`.
+DOE skips combinations that are known to be invalid before they reach runtime.
+Common examples include:
 
-## DOE schema (v1)
+- model/task mismatches
+- split strategy and split mode mismatches
+- missing validation split settings
+- missing target or SMILES columns
+- unsupported feature input for a model
+- Chemprop or Chemeleon preprocessing combinations that are not meaningful
+- duplicate rendered runtime configs
+- runtime schema validation errors
 
-Top-level keys:
+Skipped child cases stay in `manifest.jsonl` with issue codes such as
+`DOE_MODEL_TASK_MISMATCH`, `DOE_SMILES_COLUMN_MISSING`, or
+`DOE_RUNTIME_SCHEMA_INVALID`. This is intentional: skipped cases are part of the
+audit trail.
 
-- `version` (must be `1`)
-- `dataset`
-- `search_space`
-- `defaults` (optional)
-- `constraints` (optional)
-- `selection` (optional)
-- `output`
+If `constraints.max_cases` is omitted and the expanded design exceeds the
+default safety limit of 10,000 execution cases, DOE generation fails fast.
 
-Important conventions:
+## Scientific Use
 
-- `search_space` keys use dotted paths (for example `split.mode`, `train.model.type`).
-- Values can be a scalar or list; scalar is treated as a single-value axis.
-- `defaults` uses the same dotted-path style and is applied before `search_space` factors.
-- For `split.mode: cv` or `nested_holdout_cv`, keep `n_splits` / `repeats` in `defaults`.
-- If fold/repeat indices are omitted from both `defaults` and `search_space`, DOE generation expands all folds/repeats automatically.
-- Set fold/repeat indices explicitly only when you intentionally want a single execution slice (for example debugging or retrying one failed fold).
-- DOE uses a parent/child shape:
-  - one scientific parent per logical config
-  - one execution child per concrete split slice
-  - holdout is a trivial one-child parent
-- By default, generated cases are isolated per DOE spec hash + case id:
-  - `global.base_dir` becomes `<base_dir>/<doe_spec_hash[:8]>/<case_id>`
-  - `global.run_dir` becomes `<run_dir>/<doe_spec_hash[:8]>/<case_id>` (or `<output.dir>/runs/<doe_spec_hash[:8]>/<case_id>`)
-  - `global.runs.id` is set to `case_id`
-  Set `constraints.isolate_case_artifacts: false` only if you intentionally want shared artifacts.
-- Safety cap: if `constraints.max_cases` is omitted and expanded combinations exceed 10,000, DOE generation fails fast.
+DOE is most useful when it protects the scientific comparison:
 
-## Required dataset fields (typical local CSV)
-
-```yaml
-dataset:
-  task_type: classification   # or regression
-  target_column: label
-  source:
-    type: local_csv
-    path: local_data/my_data.csv
-```
-
-For regression with `source.type: local_csv`, `target_column` is required and must exist in the CSV.
-
-For regression with `dataset.profile: reg_local_csv_ic50`, DOE expects a raw IC50-style local CSV:
-
-- `target_column` is the downstream labeled target (typically `pIC50`)
-- the source CSV must include `standard_value`
-- if you rely on activity filtering, also include the columns referenced by `curate.required_non_null_columns` / `curate.row_filters` (commonly `standard_type`, `standard_units`, `standard_relation`)
-- preserve `standard_value` through curate (`curate.keep_all_columns: true` or include it in `curate.properties`)
-
-For classification with non-binary raw labels, provide a label map:
-
-```yaml
-dataset:
-  label_source_column: Activity
-  label_map:
-    positive: [active, "1", 1]
-    negative: [inactive, "0", 0]
-```
-
-## Compatibility checks (skipped with reason codes)
-
-Examples:
-
-- `DOE_MODEL_TASK_MISMATCH`
-- `DOE_SPLIT_STRATEGY_MODE_INVALID`
-- `DOE_VALIDATION_SPLIT_REQUIRED`
-- `DOE_SELECT_REQUIRES_PREPROCESS`
-- `DOE_FEATURE_INPUT_REQUIRED`
-- `DOE_FEATURE_INPUT_REQUIRED_FOR_PREPROCESS`
-- `DOE_CHEMPROP_PREPROCESS_UNSUPPORTED`
-- `DOE_SPLIT_PARAM_INVALID`
-- `DOE_DATASET_COLUMN_MISSING`
-- `DOE_TARGET_COLUMN_MISSING`
-- `DOE_LABEL_IC50_SOURCE_COLUMNS_MISSING`
-- `DOE_SMILES_COLUMN_MISSING`
-- `DOE_CURATE_DEDUPE_INVALID`
-- `DOE_CURATE_TARGET_DROPPED`
-- `DOE_CURATE_LABEL_IC50_SOURCE_DROPPED`
-- `DOE_RUNTIME_SCHEMA_INVALID`
-
-`manifest.jsonl` contains these codes per skipped execution child.
-
-## Selection metric defaults
-
-- Classification default: `auc`
-- Regression default: `r2`
-
-You can override in `selection.primary_metric`.
-
-## Practical defaults
-
-- `clf_local_csv` + non-chemprop models default to `pipeline.feature_input: featurize.morgan`.
-- `chemprop` / `chemeleon` default to `pipeline.feature_input: smiles_native` when the DOE omits that axis.
-- `reg_chembl_ic50` defaults `global.target_column` to `pIC50`.
-- For DOE comparisons across pipelines, strongly consider:
-  - `split.require_disjoint: true`
-  - `split.require_full_test_coverage: true`
-
-## Scientific selection guidance
-
-- Avoid selecting the "best" config by comparing many configs on one fixed test split.
-- Prefer `split.mode: nested_holdout_cv` (or repeated CV) and aggregate metrics across folds/repeats.
-- Use the final untouched holdout only once for final reporting.
-
-## DOE best practices
-
-Use these rules when building DOE files for cluster runs.
-
-### 1) Use one DOE file per split mode
-
-- Keep `holdout`, `cv`, and `nested_holdout_cv` in separate DOE specs.
-- Reason: DOE uses a cartesian grid and does not support conditional axes.
-- If you mix modes in one grid, some execution settings become meaningless for some rows (for example CV fold settings in holdout mode).
-
-### 2) Keep only meaningful search axes
-
-- Put fixed choices in `defaults`.
-- Put only true experiment axes in `search_space`.
-- Good: vary `train.model.type`, `split.strategy`, and maybe one featurizer.
-- Avoid large mixed grids unless you need them; they grow very quickly.
-- For `chemprop` / `chemeleon`, keep `pipeline.feature_input: smiles_native`.
-- If you keep `pipeline.preprocess: true` in a mixed-model DOE, only the no-op branch (`preprocess.scaler: none`) is meaningful for `chemprop` / `chemeleon`.
-- Treat `smiles_native` as reserved for SMILES-native models. DOE will skip tabular models on that branch.
-
-### 3) For chemistry model comparison, prefer scaffold CV
-
-- Use `split.mode: cv` with `split.strategy: scaffold` for generalization-focused comparison.
-- Set at least:
-  - `split.cv.n_splits: 5`
-  - `split.cv.repeats: 1` (increase if budget allows)
-- Let DOE auto-expand folds/repeats unless you are debugging a specific failed fold.
-- Requirement: scaffold CV needs `canonical_smiles` in curated data.
-
-### 4) Separate hyperparameter search from evaluation design
-
-- `train.tuning.method: train_cv` is inner model tuning.
-- `split.mode: cv` or `nested_holdout_cv` is outer evaluation design.
-- Do not treat inner tuning CV alone as final performance evidence.
-
-### 5) Run a small pilot before full DOE
-
-- First run with:
-  - one model family
-  - one feature mode
-  - a few cases only
-- Confirm:
-  - metrics files are written
-  - split metadata is produced
-  - runtime is acceptable
-  - no recurring OOM/timeouts
-
-### 6) Make failure handling explicit
-
-- Always inspect:
-  - `summary.json`
-  - `manifest.jsonl`
-  - case `run_status.json` and cluster logs
-- Treat obvious pathological runs (for example extreme MAE / huge negative R2) as failed for selection.
-- Re-run only failed/stuck cases with adjusted resources or safer model params.
-
-### 7) Report robustly, not by single best point
-
-- Aggregate execution children back to the parent:
-  - mean/median
-  - spread (`std` or IQR)
+- Use the same split policy, random seed, target column, and metric policy across
+  cases.
 - Compare models on matched splits where possible.
-- Keep holdout-only sweeps for debugging or preliminary screening, not final claims.
+- Prefer scaffold CV for chemistry generalization claims.
+- Avoid picking a winner from many models on one fixed test split.
+- Use repeated CV or nested holdout CV when the conclusion needs to be robust.
+- Keep a final untouched holdout for final reporting, not iterative selection.
 
-### 8) Use deterministic, auditable settings
+Selection metadata defaults to `auc` for classification and `r2` for regression.
+Override with `selection.primary_metric` when the scientific question requires a
+different primary metric.
 
-- Set `global.random_state` explicitly.
-- Keep `constraints.isolate_case_artifacts: true`.
-- Preserve generated configs + manifests with results bundles for reproducibility.
-- When generating from a dirty working tree, keep the emitted `git_worktree.patch` referenced by `summary.json`.
+## Practical Defaults
+
+- `clf_local_csv` with non-Chemprop models defaults to
+  `pipeline.feature_input: featurize.morgan`.
+- `chemprop` and `chemeleon` default to `pipeline.feature_input: smiles_native`
+  when that axis is omitted.
+- `reg_chembl_ic50` defaults `global.target_column` to `pIC50`.
+- For comparisons across pipelines, strongly consider
+  `split.require_disjoint: true` and `split.require_full_test_coverage: true`.
+
+## Best Practices
+
+Keep one DOE file per split mode. Mixing `holdout`, `cv`, and
+`nested_holdout_cv` in one cartesian grid makes some settings meaningless for
+some rows.
+
+Keep only true experiment axes in `search_space`; put fixed choices in
+`defaults`. Large mixed grids grow quickly and are harder to interpret.
+
+For chemistry model comparison, prefer `split.mode: cv` with
+`split.strategy: scaffold`. Scaffold CV requires a usable SMILES column that can
+produce `canonical_smiles` in curated data.
+
+Separate hyperparameter search from evaluation design.
+`train.tuning.method: train_cv` is inner tuning; `split.mode: cv` or
+`nested_holdout_cv` is the outer evaluation design.
+
+Run a small pilot before the full DOE. Confirm metrics files, split metadata,
+runtime, and memory behavior before spending the full compute budget.
+
+Preserve generated configs, manifests, `summary.json`, and the emitted
+`git_worktree.patch` if generation happened from a dirty working tree. These
+files make the experiment reproducible after the run has finished.

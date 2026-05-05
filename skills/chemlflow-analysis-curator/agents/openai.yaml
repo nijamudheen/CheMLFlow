@@ -1,0 +1,4 @@
+interface:
+  display_name: "CheMLFlow Analysis Curator"
+  short_description: "Audit CheMLFlow analysis outputs."
+  default_prompt: "Use this skill to audit CheMLFlow analysis outputs for completeness, row-count balance, scaler coverage, and failed or incomplete cases."

@@ -23,74 +23,83 @@ class TropicalLayer( nn.Module ):
 
 
 class SimpleRegressionNN(nn.Module):
-    def __init__(self, input_dim, hidden_dim=64):
-        super(SimpleRegressionNN, self).__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.ReLU(),
-            nn.Linear(hidden_dim // 2, 1)
-        )
+
+    def __init__(self, input_dim, hidden_dim=64, use_tropical=False):
+        super().__init__()
+
+        layers = []
+
+        if use_tropical:
+            # TropicalLayer acts as an embedding to transform tropical 
+            # vectors to Euclidean space
+            layers.append(TropicalLayer(input_dim, hidden_dim))
+        else:
+            layers.append(nn.Linear(input_dim, hidden_dim))
+        
+        layers.append(nn.ReLU())
+        layers.append(nn.Linear(hidden_dim, hidden_dim // 2))
+        layers.append(nn.ReLU())
+        
+        layers.append(nn.Linear(hidden_dim // 2, 1))
+
+        self.net = nn.Sequential(*layers)
 
     def forward(self, x):
-        return self.net(x)
+        return self.net(x).squeeze(1)
 
-
-class SimpleRegressionTNN(nn.Module):
+class SimpleRegressionTNN(SimpleRegressionNN):
     def __init__(self, input_dim, hidden_dim=64):
-        super(SimpleRegressionTNN, self).__init__()
-        self.net = nn.Sequential(
-            nn.Linear(input_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, hidden_dim // 2),
-            nn.ReLU(),
-            TropicalLayer(hidden_dim // 2, 1)
-        )
-
-    def forward(self, x):
-        return self.net(x)
-
+        super().__init__(input_dim, hidden_dim, use_tropical=True) 
 
 class DeepRegressionNN(nn.Module):
-    def __init__(self, input_dim, hidden_dims=[128, 64, 32], dropout_rate=0.2):
-        super(DeepRegressionNN, self).__init__()
+    def __init__(
+        self,
+        input_dim,
+        hidden_dims=[128, 64, 32],
+        dropout_rate=0.2,
+        use_tropical=False,
+    ):
+        super().__init__()
+
         layers = []
-        prev_dim = input_dim
-        for h_dim in hidden_dims:
+        
+        # Following the research, the tropical layer is utilized as the 
+        # first hidden layer to perform tropical embedding[cite: 13, 55].
+        if use_tropical:
+            layers.append(TropicalLayer(input_dim, hidden_dims[0]))
+            # Note: Classical layers like BatchNorm follow the embedding[cite: 13, 55].
+            layers.append(nn.BatchNorm1d(hidden_dims[0]))
+            layers.append(nn.ReLU())
+            layers.append(nn.Dropout(dropout_rate))
+            prev_dim = hidden_dims[0]
+            # Start loop from the second hidden dimension
+            current_hidden_dims = hidden_dims[1:]
+        else:
+            prev_dim = input_dim
+            current_hidden_dims = hidden_dims
+
+        # Subsequent layers are the same as classical ones[cite: 13, 30].
+        for h_dim in current_hidden_dims:
             layers += [
                 nn.Linear(prev_dim, h_dim),
                 nn.BatchNorm1d(h_dim),
                 nn.ReLU(),
-                nn.Dropout(dropout_rate)
+                nn.Dropout(dropout_rate),
             ]
             prev_dim = h_dim
+
+        # Final linear output head for regression mapping
         layers.append(nn.Linear(prev_dim, 1))
+
         self.net = nn.Sequential(*layers)
 
     def forward(self, x):
-        return self.net(x)
+        return self.net(x).squeeze(1)
 
 
-class DeepRegressionTNN(nn.Module):
+class DeepRegressionTNN(DeepRegressionNN):
     def __init__(self, input_dim, hidden_dims=[128, 64, 32], dropout_rate=0.2):
-        super(DeepRegressionTNN, self).__init__()
-        layers = []
-        prev_dim = input_dim
-        for h_dim in hidden_dims:
-            layers += [
-                nn.Linear(prev_dim, h_dim),
-                nn.BatchNorm1d(h_dim),
-                nn.ReLU(),
-                nn.Dropout(dropout_rate)
-            ]
-            prev_dim = h_dim
-        layers.append(TropicalLayer(prev_dim, 1))
-        self.net = nn.Sequential(*layers)
-
-    def forward(self, x):
-        return self.net(x)
-
+        super().__init__(input_dim, hidden_dims, dropout_rate, use_tropical=True)
     
 class GRURegressor(nn.Module):
     def __init__(self,

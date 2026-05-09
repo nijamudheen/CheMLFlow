@@ -74,21 +74,35 @@ def audit(
     failed_configs = analysis_dir / "failed_case_configs.txt"
     failed_jobs = analysis_dir / "failed_job_ids.txt"
 
+    issues: list[str] = []
     report: dict[str, Any] = {}
     if report_path.exists():
         report = json.loads(report_path.read_text(encoding="utf-8"))
+    else:
+        issues.append("report.json is missing")
 
     agg_fields, agg_rows = _read_csv(agg_path)
     raw_fields, raw_rows = _read_csv(raw_path)
-    issues: list[str] = []
 
-    if report.get("mapping_mismatch"):
+    if not agg_path.exists():
+        issues.append("all_runs_metrics.csv is missing")
+    if not raw_path.exists():
+        issues.append("all_runs_metrics_by_execution.csv is missing")
+
+    mapping_mismatch = report.get("mapping_mismatch")
+    if mapping_mismatch is None:
+        issues.append("report.mapping_mismatch is missing")
+    elif mapping_mismatch:
         issues.append("report.mapping_mismatch is true")
 
     child_count = report.get("child_job_count_from_log")
     valid_count = report.get("valid_config_count_from_manifest")
     child_count_int = _as_int(child_count)
     valid_count_int = _as_int(valid_count)
+    if child_count is None:
+        issues.append("report.child_job_count_from_log is missing")
+    if valid_count is None:
+        issues.append("report.valid_config_count_from_manifest is missing")
     if child_count_int is not None and valid_count_int is not None and child_count_int != valid_count_int:
         issues.append("child_job_count_from_log differs from valid_config_count_from_manifest")
 
@@ -122,16 +136,24 @@ def audit(
         )
 
     state_counts = report.get("state_counts")
-    if isinstance(state_counts, dict):
+    if state_counts is None:
+        issues.append("report.state_counts is missing")
+    elif isinstance(state_counts, dict):
         bad_states = {k: v for k, v in state_counts.items() if k != "COMPLETED" and v}
         if bad_states:
             issues.append(f"non-completed states present: {bad_states}")
+    else:
+        issues.append("report.state_counts is not an object")
 
     failure_reason_counts = report.get("failure_reason_counts")
-    if isinstance(failure_reason_counts, dict):
+    if failure_reason_counts is None:
+        issues.append("report.failure_reason_counts is missing")
+    elif isinstance(failure_reason_counts, dict):
         failures = {k: v for k, v in failure_reason_counts.items() if v}
         if failures:
             issues.append(f"failure_reason_counts is not empty: {failures}")
+    else:
+        issues.append("report.failure_reason_counts is not an object")
 
     raw_bad_states = {
         k: v for k, v in _counts(raw_rows, "state").items() if k != "COMPLETED" and v
@@ -211,7 +233,7 @@ def audit(
         "primary_metric": primary_metric,
         "child_job_count_from_log": child_count,
         "valid_config_count_from_manifest": valid_count,
-        "mapping_mismatch": report.get("mapping_mismatch"),
+        "mapping_mismatch": mapping_mismatch,
         "state_counts": state_counts,
         "failure_reason_counts": failure_reason_counts,
         "raw_states": _counts(raw_rows, "state"),

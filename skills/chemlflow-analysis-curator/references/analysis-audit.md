@@ -44,6 +44,7 @@ Use `audit_analysis.py` as the final gate before ranking models. For complete be
 
 - `final_claim_ready: true`
 - no `issues`
+- `report.json` exists with required provenance and count fields
 - expected raw child and aggregate parent row counts
 - complete fold slices
 - empty failed-case files

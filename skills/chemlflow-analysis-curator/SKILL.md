@@ -23,6 +23,7 @@ Use this skill to prove a CheMLFlow analysis result is complete, balanced, and i
 
 ## Standard Checks
 
+- `report.json` exists and contains required provenance fields.
 - `child_job_count_from_log` equals `valid_config_count_from_manifest`.
 - `mapping_mismatch` is false.
 - `state_counts` contains only `COMPLETED` unless the user explicitly asks to inspect a partial run.

@@ -37,3 +37,16 @@ Lead with data integrity:
 6. failures or missing files
 
 Only after those checks pass should you summarize model performance.
+
+## Final-Claim Gate
+
+Use `audit_analysis.py` as the final gate before ranking models. For complete benchmark claims, require:
+
+- `final_claim_ready: true`
+- no `issues`
+- expected raw child and aggregate parent row counts
+- complete fold slices
+- empty failed-case files
+- finite values in the selected ranking metric
+
+If the gate fails, describe the failure and stop before reporting "best model" claims.

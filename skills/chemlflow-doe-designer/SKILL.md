@@ -24,6 +24,7 @@ Use this skill as a small operating manual for CheMLFlow DOE work. Keep the focu
 - Keep fixed choices in `defaults`; keep only true experiment axes in `search_space`.
 - Treat DOE as parent/child shaped: one scientific parent can expand to many execution children, usually CV folds.
 - For CV runs, expect all folds/repeats to be generated unless fold/repeat indices are intentionally fixed for debugging.
+- Treat `split.cv.fold_index`, `split.cv.repeat_index`, `split.inner.fold_index`, and `split.inner.repeat_index` as execution coordinates. Keep them out of `search_space`; omit them for full CV fanout or put them in `defaults` only for targeted debug/retry slices.
 - Prefer separate DOE specs for holdout, CV, and nested holdout CV.
 - Treat `smiles_native` as reserved for SMILES-native models such as `chemprop` and `chemeleon`.
 - Expect tabular models to use `featurize.rdkit`, `featurize.morgan`, or curated numeric features, not raw SMILES.

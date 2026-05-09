@@ -18,7 +18,8 @@ Use this skill to prove a CheMLFlow analysis result is complete, balanced, and i
 5. Check every aggregated CV row has complete slices, usually `slice_count=5`, `completed_slices=5`, `failed_slices=0`.
 6. Verify `scaler`, `feature_input`, `model_type`, and `split_strategy` distributions are balanced for the DOE design.
 7. Separate expected special cases from problems. For example, `chemprop` and `chemeleon` usually appear under `smiles_native`, not Morgan/RDKit.
-8. Report failures, missing statuses, incomplete folds, row-count mismatches, and suspicious metric path gaps before discussing best models.
+8. Report failures, missing statuses, incomplete folds, row-count mismatches, suspicious metric path gaps, and non-finite ranking metrics before discussing best models.
+9. Treat ranking as blocked unless the audit reports `final_claim_ready: true`.
 
 ## Standard Checks
 
@@ -32,6 +33,9 @@ Use this skill to prove a CheMLFlow analysis result is complete, balanced, and i
 - Morgan and RDKit row counts match for non-native models when both feature branches are in the DOE.
 - Split strategy counts match for random/scaffold comparisons.
 - `failed_case_configs.txt` and `failed_job_ids.txt` are empty for final complete runs.
+- Ranking metrics are finite in every complete aggregate row used for a final claim.
+
+The rule is audit first, rank second. If the audit script exits nonzero, do not summarize "best models" as final results.
 
 ## Useful Commands
 
@@ -39,6 +43,16 @@ Audit an analysis directory:
 
 ```bash
 python skills/chemlflow-analysis-curator/scripts/audit_analysis.py <analysis-dir>
+```
+
+For a common 5-fold DOE with 680 valid child executions and 136 scientific parent rows:
+
+```bash
+python skills/chemlflow-analysis-curator/scripts/audit_analysis.py <analysis-dir> \
+  --expected-valid-children 680 \
+  --expected-valid-parents 136 \
+  --expected-folds 5 \
+  --primary-metric r2
 ```
 
 Run analysis after jobs finish, adapting paths to the user's environment:

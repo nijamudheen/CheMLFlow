@@ -29,7 +29,6 @@ _NODE_TO_BLOCK = {
     "label.normalize": "label",
     "split": "split",
     "featurize.none": "featurize",
-    "featurize.lipinski": "featurize",
     "featurize.rdkit": "featurize",
     "featurize.rdkit_labeled": "featurize",
     "featurize.morgan": "featurize",

@@ -24,6 +24,7 @@ Use this skill as a small operating manual for CheMLFlow DOE work. Keep the focu
 - Keep fixed choices in `defaults`; keep only true experiment axes in `search_space`.
 - Treat DOE as parent/child shaped: one scientific parent can expand to many execution children, usually CV folds.
 - For CV runs, expect all folds/repeats to be generated unless fold/repeat indices are intentionally fixed for debugging.
+- Treat `split.cv.fold_index`, `split.cv.repeat_index`, `split.inner.fold_index`, and `split.inner.repeat_index` as execution coordinates. Keep them out of `search_space`; omit them for full CV fanout or put them in `defaults` only for targeted debug/retry slices.
 - Prefer separate DOE specs for holdout, CV, and nested holdout CV.
 - Treat `smiles_native` as reserved for SMILES-native models such as `chemprop` and `chemeleon`.
 - Expect tabular models to use `featurize.rdkit`, `featurize.morgan`, or curated numeric features, not raw SMILES.
@@ -39,10 +40,10 @@ Summarize generated DOE artifacts:
 python skills/chemlflow-doe-designer/scripts/summarize_doe.py <generated-doe-dir>
 ```
 
-Generate DOE configs from a spec only when the user has asked for execution or validation that requires it:
+Generate DOE configs from a spec only when the user has asked for execution or validation that requires it. This expands a DOE spec into concrete runtime config files and manifests; it does not train models:
 
 ```bash
-python scripts/generate_doe.py --doe config/doe_example.yaml
+python scripts/generate_doe.py --doe config/doe.example.yaml
 ```
 
 ## References

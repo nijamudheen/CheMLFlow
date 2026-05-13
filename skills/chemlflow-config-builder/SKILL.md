@@ -29,7 +29,8 @@ Use this skill to create or audit one runnable CheMLFlow runtime config for `mai
    - Tabular ML/DL: `featurize.rdkit`, `featurize.morgan`, or `featurize.none`.
    - SMILES-native models: `pipeline.feature_input: smiles_native` with `chemprop` or `chemeleon`.
 7. Configure splitting for the scientific question:
-   - Random split is fine for tutorials, smoke tests, and simple baselines.
+   - For a quick single run, prefer a holdout split unless the user asked for CV or benchmark-style comparison. Explain that holdout trains on one training split and evaluates on one held-out test split; it is not cross-validation.
+   - Random holdout split is fine for tutorials, smoke tests, and simple baselines.
    - Scaffold split is preferred when chemistry generalization matters.
    - Classification usually needs `stratify: true` and `stratify_column`.
    - Use a fixed `global.random_state` and `split.random_state`, usually `42`.
@@ -40,6 +41,8 @@ Use this skill to create or audit one runnable CheMLFlow runtime config for `mai
 9. Validate the config before execution. Check node/block consistency, model/feature compatibility, target column existence, split settings, output paths, and whether analysis artifacts will include the fields the user needs.
 
 ## Cross-Validation Rule
+
+Do not assume the user knows to ask for cross-validation. If they ask for one quick runnable config, say plainly: "This is a holdout run: it trains once and evaluates once on a held-out test split. It is useful for a quick check, but it is not cross-validation. For a stronger full CV estimate, we should generate sibling fold configs with DOE fanout."
 
 A CheMLFlow runtime config runs one CV fold slice. The `n_splits` setting says how the shared fold plan is constructed; `fold_index` says which one fold this run uses as the test fold:
 
@@ -58,6 +61,8 @@ Explain this plainly to the user: "This config runs fold 0. It does not run all 
 
 Prefer DOE fanout for full K-fold results. Only create five standalone config files when the user explicitly wants independent files and understands they are execution slices of the same design.
 
+When using examples, prefer `rep0_fold0` examples for model/task config shape. Use sibling `fold1`-`fold4` configs only to explain CV fanout or repair a missing execution slice; do not treat different folds as different scientific configurations.
+
 ## Fair Comparison Checks
 
 - When comparing RDKit, Morgan, and SMILES-native branches, confirm that row coverage is comparable. Representation-specific row loss can invalidate model/feature comparisons.
@@ -67,8 +72,5 @@ Prefer DOE fanout for full K-fold results. Only create five standalone config fi
 ## Useful References
 
 - `docs/config-options.md` for runtime config schema and node rules.
-- `references/config-examples.md` for known single-config and DOE-derived examples to imitate.
-- `tutorials/01_single_config_colab/configs/pgp_svm_cv_fold0.yaml` for a concise single-config example.
-- `config/config.pgp_chemprop.yaml` for binary classification with SMILES-native training.
-- `config/config.chembl_cv.yaml` for ChEMBL IC50 to pIC50 regression.
-- `config/doe_qm9.yaml` for DOE defaults that can inform a single config.
+- `references/config-examples.md` for canonical submitted single-config examples covering regression/classification by Chemprop, CheMeleon, random forest, and ensemble.
+- `tutorials/01_single_config_colab/configs/pgp_svm_cv_fold0.yaml` for a tracked minimal single-config tutorial example.

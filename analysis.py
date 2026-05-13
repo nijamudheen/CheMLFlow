@@ -395,8 +395,6 @@ def _infer_feature_input(config: dict[str, Any]) -> str | None:
         return "featurize.rdkit_labeled"
     if "featurize.rdkit" in nodes:
         return "featurize.rdkit"
-    if "featurize.lipinski" in nodes:
-        return "featurize.lipinski"
     if "featurize.none" in nodes or "use.curated_features" in nodes:
         return "featurize.none"
     pipeline_cfg = config.get("pipeline")

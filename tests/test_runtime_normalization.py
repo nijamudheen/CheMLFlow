@@ -113,45 +113,9 @@ def test_run_node_curate_passes_drop_controls(monkeypatch, tmp_path) -> None:
     assert cmd[req_idx + 1] == "target,aux"
 
 
-def test_lipinski_then_label_ic50_preserves_legacy_chain(monkeypatch, tmp_path) -> None:
-    raw = tmp_path / "raw.csv"
-    curated = tmp_path / "curated.csv"
-    lipinski = tmp_path / "lipinski_results.csv"
-    pic50_3class = tmp_path / "pic50_3class.csv"
-    pic50_2class = tmp_path / "pic50_2class.csv"
-    pd.DataFrame({"canonical_smiles": ["CCO"], "standard_value": [1000]}).to_csv(curated, index=False)
-    raw.write_text("", encoding="utf-8")
-
-    commands: list[list[str]] = []
-    monkeypatch.setattr(main, "validate_contract", lambda *args, **kwargs: None)
-
-    def _fake_run_subprocess(cmd: list[str], *, cwd: str | None = None):
-        commands.append(cmd)
-        output_path = cmd[-1]
-        pd.DataFrame({"canonical_smiles": ["CCO"], "standard_value": [1000]}).to_csv(output_path, index=False)
-        return None
-
-    monkeypatch.setattr(main, "_run_subprocess", _fake_run_subprocess)
-
-    context = {
-        "paths": {
-            "raw": str(raw),
-            "curated": str(curated),
-            "lipinski": str(lipinski),
-            "pic50_3class": str(pic50_3class),
-            "pic50_2class": str(pic50_2class),
-        },
-    }
-
-    main.run_node_featurize_lipinski(context)
-    assert context["curated_path"] == str(lipinski)
-
-    main.run_node_label_ic50(context)
-
-    lipinski_cmd, label_cmd = commands
-    assert lipinski_cmd[-1] == str(lipinski)
-    assert label_cmd[1].endswith("IC50_pIC50.py")
-    assert label_cmd[2] == str(lipinski)
+def test_lipinski_featurizer_is_not_a_runtime_node() -> None:
+    assert "featurize.lipinski" not in main.NODE_REGISTRY
+    assert "featurize.lipinski" not in main._SPLIT_MUST_FOLLOW
 
 
 def test_canonicalize_pipeline_nodes_maps_legacy_alias() -> None:

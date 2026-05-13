@@ -1101,7 +1101,7 @@ def _build_case_config(
         config["split"] = split_cfg
 
     has_configurable_featurizer = any(
-        node in {"featurize.morgan", "featurize.rdkit", "featurize.rdkit_labeled", "featurize.lipinski"}
+        node in {"featurize.morgan", "featurize.rdkit", "featurize.rdkit_labeled"}
         for node in nodes
     )
     if has_configurable_featurizer:

@@ -1,0 +1,4 @@
+interface:
+  display_name: "CheMLFlow Config Builder"
+  short_description: "Create and review single CheMLFlow runtime configs."
+  default_prompt: "Use this skill to build or audit one CheMLFlow runtime config, including task type, curation, feature/model compatibility, split/CV behavior, scaler choice, and output readiness."

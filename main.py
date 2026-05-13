@@ -25,8 +25,6 @@ from contracts import (
     ANALYZE_STATS_OUTPUT_CONTRACT,
     CURATE_INPUT_CONTRACT,
     CURATE_OUTPUT_CONTRACT,
-    FEATURIZE_LIPINSKI_INPUT_CONTRACT,
-    FEATURIZE_LIPINSKI_OUTPUT_CONTRACT,
     FEATURIZE_RDKIT_INPUT_CONTRACT,
     FEATURIZE_RDKIT_OUTPUT_CONTRACT,
     FEATURIZE_RDKIT_LABELED_INPUT_CONTRACT,
@@ -48,7 +46,6 @@ from contracts import (
     LABEL_IC50_INPUT_CONTRACT,
     LABEL_IC50_OUTPUT_2CLASS_CONTRACT,
     LABEL_IC50_OUTPUT_3CLASS_CONTRACT,
-    LIPINSKI_CONTRACT,
     MODEL_LABELS_CONTRACT,
     PIC50_2CLASS_CONTRACT,
     PIC50_3CLASS_CONTRACT,
@@ -83,7 +80,6 @@ def build_paths(base_dir: str) -> dict[str, str]:
         "curated": os.path.join(base_dir, "curated.csv"),
         "curated_labeled": os.path.join(base_dir, "curated_labeled.csv"),
         "curated_smiles": os.path.join(base_dir, "curated_smiles.csv"),
-        "lipinski": os.path.join(base_dir, "lipinski_results.csv"),
         "pic50_3class": os.path.join(base_dir, "bioactivity_3class_pIC50.csv"),
         "pic50_2class": os.path.join(base_dir, "bioactivity_2class_pIC50.csv"),
         "rdkit_descriptors": os.path.join(base_dir, "rdkit_descriptors.csv"),
@@ -542,25 +538,6 @@ def run_node_featurize_none(context: dict) -> None:
     context["feature_matrix"] = curated_path
     context["labels_matrix"] = curated_path
     context["feature_method"] = "none"
-
-
-def run_node_featurize_lipinski(context: dict) -> None:
-    validate_contract(
-        bind_output_path(
-            FEATURIZE_LIPINSKI_INPUT_CONTRACT,
-            context.get("curated_path", context["paths"]["curated"]),
-        ),
-        warn_only=False,
-    )
-    script_path = os.path.join("utilities", "Lipinski_rules.py")
-    smiles_file = context.get("curated_path", context["paths"]["curated"])
-    output_file = context["paths"]["lipinski"]
-    _run_subprocess([sys.executable, script_path, smiles_file, output_file])
-    validate_contract(
-        bind_output_path(FEATURIZE_LIPINSKI_OUTPUT_CONTRACT, output_file),
-        warn_only=True,
-    )
-    context["curated_path"] = output_file
 
 
 def run_node_label_ic50(context: dict) -> None:
@@ -2596,7 +2573,6 @@ NODE_REGISTRY = {
     "featurize.none": run_node_featurize_none,
     "label.normalize": run_node_label_normalize,
     "split": run_node_split,
-    "featurize.lipinski": run_node_featurize_lipinski,
     "label.ic50": run_node_label_ic50,
     "analyze.stats": run_node_analyze_stats,
     "analyze.eda": run_node_analyze_eda,
@@ -2622,7 +2598,6 @@ _SPLIT_MUST_FOLLOW = {
     "label.normalize",
     "label.ic50",
     "featurize.none",
-    "featurize.lipinski",
     "featurize.rdkit",
     "featurize.rdkit_labeled",
     "featurize.morgan",

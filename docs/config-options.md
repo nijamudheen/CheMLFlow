@@ -102,7 +102,7 @@ pipeline:
 | Data loading | `get_data` |
 | Data preparation | `curate`, `label.normalize`, `label.ic50` |
 | Splitting | `split` |
-| Featurization | `featurize.none`, `featurize.lipinski`, `featurize.rdkit`, `featurize.rdkit_labeled`, `featurize.morgan` |
+| Featurization | `featurize.none`, `featurize.rdkit`, `featurize.rdkit_labeled`, `featurize.morgan` |
 | Preprocessing | `preprocess.features`, `select.features` |
 | Training | `train`, `train.tdc` |
 | Analysis | `analyze.stats`, `analyze.eda`, `explain` |
@@ -113,7 +113,7 @@ pipeline:
 - Only one `train.tdc` node allowed per pipeline.
 - `train` and `train.tdc` cannot both be in the same pipeline.
 - If using `train.tdc`, it must be the last node.
-- `split` must come **after** any of: `curate`, `label.normalize`, `label.ic50`, `featurize.none`, `featurize.lipinski`, `featurize.rdkit`, `featurize.rdkit_labeled`, `featurize.morgan`.
+- `split` must come **after** any of: `curate`, `label.normalize`, `label.ic50`, `featurize.none`, `featurize.rdkit`, `featurize.rdkit_labeled`, `featurize.morgan`.
 - `split` must come **before** any of: `preprocess.features`, `select.features`, `train`, `explain`.
 
 ## `get_data` Block
@@ -343,8 +343,8 @@ featurize:
 | `radius` | `2` | Morgan fingerprint radius (higher = more structural context). |
 | `n_bits` | `2048` | Fingerprint bit vector length. |
 
-> **Note:** `featurize.rdkit` and `featurize.lipinski` use fixed settings and do not accept additional config keys.
-> `featurize.lipinski` is optional exploratory featurization. `label.ic50` only needs `standard_value` and can run directly on curated ChemBL data.
+> **Note:** `featurize.rdkit` uses fixed settings and does not accept additional config keys.
+> `label.ic50` only needs `standard_value` and can run directly on curated ChemBL data.
 
 ## `preprocess` Block
 

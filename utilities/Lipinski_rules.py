@@ -7,7 +7,7 @@ from rdkit.Chem import Descriptors, Lipinski
 
 class LipinskiRuleEvaluator:
     """Class to evaluate ADME profiles using Lipinski's Rule of Five."""
-    
+
     def __init__(self, smiles_file, output_file):
         self.smiles_file = smiles_file
         self.output_file = output_file
@@ -90,7 +90,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Evaluate ADME profile using Lipinski's Rule of Five.")
     parser.add_argument('smiles_file', type=str, help="Input CSV file containing SMILES data.")
     parser.add_argument('output_file', type=str, help="Output CSV file to save the combined results.")
-    
+
     args = parser.parse_args()
 
     main(args.smiles_file, args.output_file)

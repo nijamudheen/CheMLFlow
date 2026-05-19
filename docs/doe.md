@@ -71,6 +71,19 @@ This writes `execution_manifest.jsonl` and one log per case under
 `local_logs/`. It reads valid execution children from `manifest.jsonl`; CV
 designs still run as one child config per fold/repeat.
 
+For parallel local execution, raise `--max-workers` and keep `--resume`:
+
+```bash
+python scripts/run_doe_local.py --doe-dir config/generated/flash_doe --max-workers 4 --resume
+```
+
+Do not combine `--max-workers > 1` with `--stop-on-failure`.
+`--stop-on-failure` is reserved for serial fail-fast debugging, for example:
+
+```bash
+python scripts/run_doe_local.py --doe-dir config/generated/flash_doe --limit 1 --stop-on-failure
+```
+
 Analyze local DOE runs without Slurm:
 
 ```bash

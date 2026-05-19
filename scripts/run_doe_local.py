@@ -366,6 +366,15 @@ def main(argv: list[str] | None = None) -> int:
 
     logs_dir.mkdir(parents=True, exist_ok=True)
     max_workers = max(1, int(args.max_workers))
+    if max_workers > 1 and args.stop_on_failure:
+        print(
+            "[local-doe] refusing --max-workers > 1 with --stop-on-failure because "
+            "--stop-on-failure currently uses the serial execution path. Remove "
+            "--stop-on-failure for parallel execution, or set --max-workers 1 for "
+            "serial fail-fast debugging.",
+            file=sys.stderr,
+        )
+        return 2
     if max_workers > 1 and not args.allow_shared_artifacts:
         duplicates = _duplicate_artifact_dirs(records, doe_dir=doe_dir)
         if duplicates:

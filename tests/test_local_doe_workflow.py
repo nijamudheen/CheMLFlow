@@ -324,7 +324,7 @@ def test_analysis_local_backend_marks_success_without_metrics_partial(
     assert rows[0]["completed_slices"] == "0"
 
 
-def test_analysis_local_backend_marks_missing_split_metrics_partial(
+def test_analysis_local_backend_keeps_top_level_metrics_without_split_metrics(
     tmp_path: Path, monkeypatch
 ) -> None:
     doe_dir = tmp_path / "generated"
@@ -365,16 +365,25 @@ def test_analysis_local_backend_marks_missing_split_metrics_partial(
 
     assert analysis.main() == 0
     report = json.loads((output_dir / "report.json").read_text(encoding="utf-8"))
-    assert report["state_counts"] == {"PARTIAL": 1}
-    assert report["failure_reason_counts"] == {"missing_split_metrics": 1}
+    assert report["state_counts"] == {"COMPLETED": 1}
+    assert report["failure_reason_counts"] == {}
+    assert report["metric_artifacts"] == {
+        "completed_jobs": 1,
+        "missing_metrics": 0,
+        "top_level_metric_jobs": 1,
+        "split_metric_jobs": 0,
+        "missing_split_metrics": 1,
+        "primary_metric_complete": True,
+        "split_diagnostics_complete": False,
+    }
     assert report["generalization"]["records_by_execution"] == 0
 
     with (output_dir / "all_runs_metrics.csv").open("r", encoding="utf-8", newline="") as fh:
         rows = list(csv.DictReader(fh))
-    assert rows[0]["state"] == "PARTIAL"
-    assert rows[0]["failure_reason"] == "missing_split_metrics=1"
-    assert rows[0]["completed_slices"] == "0"
-    assert rows[0]["r2"] == ""
+    assert rows[0]["state"] == "COMPLETED"
+    assert rows[0]["failure_reason"] == ""
+    assert rows[0]["completed_slices"] == "1"
+    assert rows[0]["r2"] == "0.72"
 
 
 def test_run_doe_local_refuses_parallel_shared_artifact_dirs(tmp_path: Path) -> None:
@@ -416,3 +425,44 @@ def test_run_doe_local_refuses_parallel_shared_artifact_dirs(tmp_path: Path) -> 
     assert completed.returncode == 2
     assert "refusing parallel execution" in completed.stderr
     assert "run_dir" in completed.stderr
+
+
+def test_run_doe_local_refuses_parallel_stop_on_failure(tmp_path: Path) -> None:
+    doe_dir = tmp_path / "generated"
+    config_path = doe_dir / "case_0001.yaml"
+    _write_config(config_path, run_dir=tmp_path / "runs" / "case_0001", fold_index=0)
+    _write_manifest(
+        doe_dir,
+        [
+            {
+                "record_type": "execution_child",
+                "status": "valid",
+                "case_id": "case_0001",
+                "parent_case_id": "parent_0001",
+                "scientific_config_id": "sci_config_1",
+                "execution_label": "rep0_fold0",
+                "config_path": str(config_path),
+            }
+        ],
+    )
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "run_doe_local.py"),
+            "--doe-dir",
+            str(doe_dir),
+            "--max-workers",
+            "2",
+            "--stop-on-failure",
+            "--dry-run",
+        ],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 2
+    assert "refusing --max-workers > 1 with --stop-on-failure" in completed.stderr
+    assert "serial fail-fast debugging" in completed.stderr

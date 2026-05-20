@@ -1,0 +1,25 @@
+{
+  "status": "success",
+  "start_time": "2026-05-14T00:56:10.480613+00:00",
+  "end_time": "2026-05-14T03:25:10.726963+00:00",
+  "config_path": "/mnt/ufs18/rs-049/Workflow_ML_Chemistry/CheMLFlow-main/A-NVAR_doe/case_0004__ts_forecast__dl_adaptive_nvar__nosplit__na.yaml",
+  "run_dir": "/mnt/ufs18/rs-049/Workflow_ML_Chemistry/CheMLFlow-main/output/runs/2ab828f7/case_0004",
+  "base_dir": "/mnt/ufs18/rs-049/Workflow_ML_Chemistry/CheMLFlow-main/output/data/2ab828f7/case_0004",
+  "pipeline_nodes": [
+    "get_data",
+    "train.timeseries"
+  ],
+  "config_hash": "5bf2f02b66fae52b62c6a12e1d04d0b56479bfd8e1fa4eebf847c23804f00946",
+  "config_fingerprint": "fba769eabc101956a1067c83e5cc7920a204df6454509676aafc65ccfd194d37",
+  "git_sha": null,
+  "artifact_retention": "full",
+  "artifact_retention_summary": {
+    "retention": "full",
+    "run_status": "success",
+    "candidate_count": 0,
+    "deleted_count": 0,
+    "skipped_preexisting_count": 0,
+    "failed_delete_count": 0,
+    "failed_deletes": []
+  }
+}

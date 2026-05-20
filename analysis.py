@@ -11,7 +11,7 @@ import re
 import subprocess
 import sys
 from collections import Counter, defaultdict
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -23,7 +23,6 @@ except Exception:  # pragma: no cover - optional for CSV-only mode
 
 
 CHILD_ID_PATTERN = re.compile(r"Submitted batch job (\d+)")
-REPO_ROOT = Path(__file__).resolve().parent
 
 
 @dataclass(frozen=True)
@@ -43,8 +42,6 @@ class ChildJob:
     exit_code: str
     elapsed: str
     failure_reason: str | None
-    log_path: str | None = None
-    execution_manifest_path: str | None = None
 
 
 @dataclass(frozen=True)
@@ -77,6 +74,12 @@ class GeneralizationRecord:
     config_paths: tuple[str, ...] = ()
     run_dirs: tuple[str, ...] = ()
 
+
+HORIZON_RMSE_FIELDS = [
+    f"{segment}_rmse_h{h}"
+    for segment in ("train", "val", "test")
+    for h in (25, 50, 75, 100)
+]
 
 METRIC_FIELDS = [
     "r2",
@@ -111,7 +114,7 @@ METRIC_FIELDS = [
     "train_f1",
     "test_f1",
     "val_f1",
-]
+] + HORIZON_RMSE_FIELDS
 
 
 RUN_METRIC_CSV_FIELDS = [
@@ -145,19 +148,13 @@ RUN_METRIC_CSV_FIELDS = [
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Analyze CheMLFlow DOE runs from Slurm job logs + sacct or from local "
-            "run_status.json files, then write summary reports (JSON/CSV)."
+            "Analyze CheMLFlow DOE orchestration runs from Slurm job logs + sacct and "
+            "write summary reports (JSON/CSV)."
         )
     )
     parser.add_argument(
-        "--backend",
-        choices=("slurm", "local"),
-        default="slurm",
-        help="Execution backend to analyze. Use local for manifest/run_status-based DOE runs.",
-    )
-    parser.add_argument(
         "--orchestrator-job-id",
-        default="",
+        required=True,
         help="Slurm orchestrator job ID (for example: 2307731).",
     )
     parser.add_argument(
@@ -177,14 +174,6 @@ def _parse_args() -> argparse.Namespace:
         "--doe-dir",
         default="/mnt/home/f0113398/ysi_doe",
         help="DOE output directory containing manifest.jsonl and generated case YAMLs.",
-    )
-    parser.add_argument(
-        "--execution-manifest",
-        default="",
-        help=(
-            "Optional backend-neutral execution attempt manifest. "
-            "Default for --backend local: <doe-dir>/execution_manifest.jsonl when present."
-        ),
     )
     parser.add_argument(
         "--output-dir",
@@ -264,51 +253,6 @@ def _load_valid_manifest_records(manifest_path: Path) -> list[dict[str, Any]]:
     return valid
 
 
-def _load_execution_attempt_records(path: Path | None) -> list[dict[str, Any]]:
-    if path is None or not path.exists():
-        return []
-    records: list[dict[str, Any]] = []
-    for line in _read_text(path).splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        record = json.loads(line)
-        record_type = str(record.get("record_type", "")).strip().lower()
-        if record_type and record_type != "execution_attempt":
-            continue
-        records.append(record)
-    return records
-
-
-def _normalize_path_key(value: Any, doe_dir: Path) -> str:
-    text = str(value or "").strip()
-    if not text:
-        return ""
-    path = Path(text)
-    if path.is_absolute():
-        return str(path)
-    for candidate in (Path.cwd() / path, REPO_ROOT / path, doe_dir / path):
-        if candidate.exists():
-            return str(candidate)
-    return str((Path.cwd() / path).absolute())
-
-
-def _index_execution_attempts(
-    attempts: list[dict[str, Any]],
-    doe_dir: Path,
-) -> tuple[dict[str, dict[str, Any]], dict[str, dict[str, Any]]]:
-    by_case_id: dict[str, dict[str, Any]] = {}
-    by_config_path: dict[str, dict[str, Any]] = {}
-    for attempt in attempts:
-        case_id = str(attempt.get("case_id", "")).strip()
-        if case_id:
-            by_case_id[case_id] = attempt
-        config_key = _normalize_path_key(attempt.get("config_path"), doe_dir)
-        if config_key:
-            by_config_path[config_key] = attempt
-    return by_case_id, by_config_path
-
-
 def _run_sacct(sacct_bin: str, child_ids: list[str]) -> list[dict[str, str]]:
     if not child_ids:
         return []
@@ -342,198 +286,6 @@ def _run_sacct(sacct_bin: str, child_ids: list[str]) -> list[dict[str, str]]:
             }
         )
     return rows
-
-
-def _resolve_manifest_config_path(config_path: str | None, doe_dir: Path) -> Path | None:
-    if not config_path:
-        return None
-    path = Path(str(config_path))
-    if path.is_absolute():
-        return path
-    candidates = [Path.cwd() / path, REPO_ROOT / path, doe_dir / path]
-    for candidate in candidates:
-        if candidate.exists():
-            return candidate
-    return candidates[0]
-
-
-def _load_yaml_config(path: Path | None) -> dict[str, Any]:
-    if path is None or yaml is None or not path.exists():
-        return {}
-    try:
-        loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except Exception:
-        return {}
-    return loaded if isinstance(loaded, dict) else {}
-
-
-def _run_dir_from_config(config: dict[str, Any]) -> Path | None:
-    global_cfg = config.get("global") if isinstance(config.get("global"), dict) else {}
-    run_dir = str(global_cfg.get("run_dir", "")).strip()
-    return Path(run_dir) if run_dir else None
-
-
-def _parse_status_time(value: Any) -> datetime | None:
-    text = str(value or "").strip()
-    if not text:
-        return None
-    try:
-        if text.endswith("Z"):
-            text = f"{text[:-1]}+00:00"
-        parsed = datetime.fromisoformat(text)
-        if parsed.tzinfo is None:
-            parsed = parsed.replace(tzinfo=timezone.utc)
-        return parsed
-    except ValueError:
-        return None
-
-
-def _elapsed_from_run_status(run_status: dict[str, Any] | None) -> str:
-    if not run_status:
-        return ""
-    start = _parse_status_time(run_status.get("start_time"))
-    end = _parse_status_time(run_status.get("end_time"))
-    if start is None or end is None:
-        return ""
-    return str(max(0, int((end - start).total_seconds())))
-
-
-def _local_failure_reason(run_status: dict[str, Any] | None, status: str) -> str | None:
-    normalized = status.strip().lower()
-    if normalized == "success":
-        return None
-    if run_status is None:
-        return "missing_run_status"
-    if normalized == "running":
-        return "running"
-    if normalized == "failed":
-        failed_node = str(run_status.get("failed_node", "")).strip()
-        exception_type = str(run_status.get("exception_type", "")).strip()
-        if failed_node and exception_type:
-            return f"{failed_node}:{exception_type}"
-        return exception_type or failed_node or "failed"
-    return f"run_status_{normalized or 'unknown'}"
-
-
-def _local_state_from_run_status(run_status: dict[str, Any] | None) -> tuple[str, str, str | None]:
-    if run_status is None:
-        return "UNKNOWN", "", "missing_run_status"
-    status = str(run_status.get("status", "")).strip().lower()
-    if status == "success":
-        return "COMPLETED", "0", None
-    if status == "failed":
-        return "FAILED", "1", _local_failure_reason(run_status, status)
-    if status == "running":
-        return "RUNNING", "", _local_failure_reason(run_status, status)
-    return "UNKNOWN", "", _local_failure_reason(run_status, status)
-
-
-def _failure_reason_from_attempt(attempt: dict[str, Any] | None) -> str | None:
-    if not attempt:
-        return None
-    reason = str(attempt.get("failure_reason", "")).strip()
-    if reason:
-        return reason
-    return_code = attempt.get("return_code")
-    if return_code not in {None, "", 0, "0"}:
-        return "nonzero_return_code"
-    state = str(attempt.get("state", "")).strip().upper()
-    if state in {"FAILED", "CANCELLED", "TIMEOUT"}:
-        return state.lower()
-    if state == "DRY_RUN":
-        return "dry_run"
-    return None
-
-
-def _merge_local_state(
-    *,
-    run_status: dict[str, Any] | None,
-    attempt: dict[str, Any] | None,
-) -> tuple[str, str, str | None]:
-    status_state, status_exit_code, status_failure = _local_state_from_run_status(run_status)
-    if not attempt:
-        return status_state, status_exit_code, status_failure
-
-    attempt_state = str(attempt.get("state", "")).strip().upper()
-    attempt_return_code = attempt.get("return_code")
-    attempt_exit_code = "" if attempt_return_code in {None, ""} else str(attempt_return_code)
-    attempt_failure = _failure_reason_from_attempt(attempt)
-
-    if attempt_state in {"FAILED", "CANCELLED", "TIMEOUT"} or attempt_return_code not in {
-        None,
-        "",
-        0,
-        "0",
-    }:
-        return "FAILED", attempt_exit_code or status_exit_code, attempt_failure or status_failure
-    if attempt_state == "DRY_RUN":
-        return "DRY_RUN", "", attempt_failure
-    if attempt_state == "SKIPPED":
-        if status_state == "COMPLETED":
-            return "COMPLETED", "0", None
-        return "SKIPPED", attempt_exit_code, attempt_failure or status_failure
-    if attempt_state == "COMPLETED":
-        if status_state in {"COMPLETED", "UNKNOWN"}:
-            return "COMPLETED", attempt_exit_code or "0", None
-        return status_state, attempt_exit_code or status_exit_code, status_failure
-    return status_state, attempt_exit_code or status_exit_code, status_failure or attempt_failure
-
-
-def _build_local_jobs(
-    valid_manifest_records: list[dict[str, Any]],
-    doe_dir: Path,
-    execution_attempts: list[dict[str, Any]] | None = None,
-    execution_manifest_path: Path | None = None,
-) -> list[ChildJob]:
-    attempts_by_case_id, attempts_by_config_path = _index_execution_attempts(
-        execution_attempts or [],
-        doe_dir,
-    )
-    jobs: list[ChildJob] = []
-    for idx, record in enumerate(valid_manifest_records, start=1):
-        cfg_path = _resolve_manifest_config_path(record.get("config_path"), doe_dir)
-        cfg = _load_yaml_config(cfg_path)
-        run_dir = _run_dir_from_config(cfg)
-        run_status = _load_json(run_dir / "run_status.json") if run_dir else None
-        case_id = str(record.get("case_id", "")).strip()
-        cfg_key = _normalize_path_key(cfg_path, doe_dir)
-        attempt = attempts_by_case_id.get(case_id) or attempts_by_config_path.get(cfg_key)
-        state, exit_code, failure_reason = _merge_local_state(
-            run_status=run_status,
-            attempt=attempt,
-        )
-        case_name = _parse_case_name(str(cfg_path) if cfg_path else record.get("config_path"))
-        profile, parsed_model_type, parsed_split_mode, parsed_split_strategy = _extract_case_fields(case_name)
-        train_cfg = cfg.get("train") if isinstance(cfg.get("train"), dict) else {}
-        train_model_cfg = train_cfg.get("model") if isinstance(train_cfg.get("model"), dict) else {}
-        model_type = str(train_model_cfg.get("type", "")).strip() or parsed_model_type
-        split_mode = str(_get_dotted(cfg, "split.mode", parsed_split_mode or "")).strip() or None
-        split_strategy = str(_get_dotted(cfg, "split.strategy", parsed_split_strategy or "")).strip() or None
-        scaler = _infer_scaler(cfg) if cfg else None
-        jobs.append(
-            ChildJob(
-                job_id=f"local_{idx:05d}",
-                case_name=case_name,
-                parent_case_id=str(record.get("parent_case_id", "")).strip() or None,
-                config_path=str(cfg_path) if cfg_path else record.get("config_path"),
-                profile=profile,
-                model_type=model_type,
-                scaler=scaler,
-                split_mode=split_mode,
-                split_strategy=split_strategy,
-                scientific_config_id=str(record.get("scientific_config_id", "")).strip() or None,
-                execution_label=str(record.get("execution_label", "")).strip() or None,
-                state=state,
-                exit_code=exit_code,
-                elapsed=str(attempt.get("elapsed_seconds", "")).strip()
-                if attempt and str(attempt.get("elapsed_seconds", "")).strip()
-                else _elapsed_from_run_status(run_status),
-                failure_reason=failure_reason,
-                log_path=str(attempt.get("log_path", "")).strip() if attempt else None,
-                execution_manifest_path=str(execution_manifest_path) if execution_manifest_path else None,
-            )
-        )
-    return jobs
 
 
 def _parse_case_name(case_config_path: str | None) -> str | None:
@@ -649,6 +401,8 @@ def _infer_feature_input(config: dict[str, Any]) -> str | None:
         return "featurize.rdkit_labeled"
     if "featurize.rdkit" in nodes:
         return "featurize.rdkit"
+    if "featurize.lipinski" in nodes:
+        return "featurize.lipinski"
     if "featurize.none" in nodes or "use.curated_features" in nodes:
         return "featurize.none"
     pipeline_cfg = config.get("pipeline")
@@ -791,83 +545,6 @@ def _resolve_split_metrics(
     else:
         fallback = run_dir / f"{model_type}_split_metrics.json"
     return _load_json(fallback)
-
-
-def _append_failure_reason(existing: str | None, reason: str) -> str:
-    current = str(existing or "").strip()
-    if not current:
-        return reason
-    if reason in {chunk.strip() for chunk in current.split(";")}:
-        return current
-    return f"{current}; {reason}"
-
-
-def _job_missing_expected_metrics(job: ChildJob) -> bool:
-    if job.state != "COMPLETED" or not job.config_path:
-        return False
-    cfg_path = Path(job.config_path)
-    cfg = _load_yaml_config(cfg_path)
-    if not cfg:
-        return False
-    run_dir = _run_dir_from_config(cfg)
-    train_cfg = cfg.get("train") if isinstance(cfg.get("train"), dict) else {}
-    train_model_cfg = train_cfg.get("model") if isinstance(train_cfg.get("model"), dict) else {}
-    model_type = job.model_type or str(train_model_cfg.get("type", "")).strip()
-    if not run_dir or not model_type:
-        return False
-    metrics_path = _resolve_metrics_path(run_dir, model_type)
-    return _load_json(metrics_path) is None
-
-
-def _job_missing_split_metrics(job: ChildJob) -> bool:
-    if job.state != "COMPLETED" or not job.config_path:
-        return False
-    cfg_path = Path(job.config_path)
-    cfg = _load_yaml_config(cfg_path)
-    if not cfg:
-        return False
-    run_dir = _run_dir_from_config(cfg)
-    train_cfg = cfg.get("train") if isinstance(cfg.get("train"), dict) else {}
-    train_model_cfg = train_cfg.get("model") if isinstance(train_cfg.get("model"), dict) else {}
-    model_type = job.model_type or str(train_model_cfg.get("type", "")).strip()
-    if not run_dir or not model_type:
-        return False
-    metrics_path = _resolve_metrics_path(run_dir, model_type)
-    metrics_payload = _load_json(metrics_path)
-    if metrics_payload is None:
-        return False
-    split_metrics = _resolve_split_metrics(
-        model_type=model_type,
-        run_dir=run_dir,
-        metrics_payload=metrics_payload,
-    )
-    if not isinstance(split_metrics, dict):
-        return True
-    return _extract_primary_metric(split_metrics) is None
-
-
-def _mark_missing_metric_jobs(jobs: list[ChildJob]) -> list[ChildJob]:
-    updated: list[ChildJob] = []
-    for job in jobs:
-        if _job_missing_expected_metrics(job):
-            updated.append(
-                replace(
-                    job,
-                    state="PARTIAL",
-                    failure_reason=_append_failure_reason(job.failure_reason, "missing_metrics"),
-                )
-            )
-        elif _job_missing_split_metrics(job):
-            updated.append(
-                replace(
-                    job,
-                    state="PARTIAL",
-                    failure_reason=_append_failure_reason(job.failure_reason, "missing_split_metrics"),
-                )
-            )
-        else:
-            updated.append(job)
-    return updated
 
 
 def _extract_primary_metric(split_metrics: dict[str, Any]) -> str | None:
@@ -1122,9 +799,7 @@ def _write_generalization_csv(path: Path, records: list[GeneralizationRecord]) -
                     "test_value": r.test_value,
                     "val_value": "" if r.val_value is None else r.val_value,
                     "gap_train_minus_test": r.gap_train_minus_test,
-                    "gap_train_minus_test_std": (
-                        "" if r.gap_train_minus_test_std is None else r.gap_train_minus_test_std
-                    ),
+                    "gap_train_minus_test_std": "" if r.gap_train_minus_test_std is None else r.gap_train_minus_test_std,
                     "overfit_flag": int(r.overfit_flag),
                     "underfit_flag": int(r.underfit_flag),
                     "config_path": r.config_path or "",
@@ -1139,9 +814,6 @@ def _write_generalization_plot(path: Path, records: list[GeneralizationRecord], 
     if not records:
         return False
     try:
-        import matplotlib
-
-        matplotlib.use("Agg", force=True)
         import matplotlib.pyplot as plt
     except Exception:
         return False
@@ -1273,28 +945,12 @@ def _build_all_runs_metric_rows(jobs: list[ChildJob]) -> list[dict[str, Any]]:
             mp = _resolve_metrics_path(run_dir_path, model_type)
             metrics_path = str(mp)
             metrics_payload = _load_json(mp)
-            split_metrics = _resolve_split_metrics(
-                model_type=model_type,
-                run_dir=run_dir_path,
-                metrics_payload=metrics_payload,
-            )
+            split_metrics = _resolve_split_metrics(model_type=model_type, run_dir=run_dir_path, metrics_payload=metrics_payload)
 
         top_metrics = metrics_payload if isinstance(metrics_payload, dict) else {}
-        train_split = (
-            split_metrics.get("train")
-            if isinstance(split_metrics, dict) and isinstance(split_metrics.get("train"), dict)
-            else {}
-        )
-        test_split = (
-            split_metrics.get("test")
-            if isinstance(split_metrics, dict) and isinstance(split_metrics.get("test"), dict)
-            else {}
-        )
-        val_split = (
-            split_metrics.get("val")
-            if isinstance(split_metrics, dict) and isinstance(split_metrics.get("val"), dict)
-            else {}
-        )
+        train_split = split_metrics.get("train") if isinstance(split_metrics, dict) and isinstance(split_metrics.get("train"), dict) else {}
+        test_split = split_metrics.get("test") if isinstance(split_metrics, dict) and isinstance(split_metrics.get("test"), dict) else {}
+        val_split = split_metrics.get("val") if isinstance(split_metrics, dict) and isinstance(split_metrics.get("val"), dict) else {}
 
         rows.append(
             {
@@ -1354,6 +1010,13 @@ def _build_all_runs_metric_rows(jobs: list[ChildJob]) -> list[dict[str, Any]]:
                 "train_f1": train_split.get("f1", ""),
                 "test_f1": test_split.get("f1", ""),
                 "val_f1": val_split.get("f1", ""),
+                **{
+                    f"{segment}_rmse_h{h}": _pick_horizon_metric(
+                        segment, h, split_metrics, top_metrics
+                    )
+                    for segment in ("train", "val", "test")
+                    for h in (25, 50, 75, 100)
+                },
             }
         )
         for metric_field in METRIC_FIELDS:
@@ -1361,6 +1024,42 @@ def _build_all_runs_metric_rows(jobs: list[ChildJob]) -> list[dict[str, Any]]:
 
     return rows
 
+
+
+
+def _pick_horizon_metric(
+    segment: str,
+    horizon: int,
+    split_metrics: dict[str, Any] | None,
+    top_metrics: dict[str, Any] | None,
+) -> Any:
+    """Pick the best available RMSE@horizon value for analysis CSVs.
+
+    Preference order:
+    1. repeated final-test mean from metrics.json,
+    2. repeated mean from split_metrics.json,
+    3. canonical split value (which may already be the repeated mean after the
+       time-series trainer finishes all final runs).
+    """
+    key = f"rmse_h{horizon}"
+    repeated_name = f"{segment}_rmse_horizons_repeated"
+    top_repeated = (top_metrics or {}).get(repeated_name)
+    if isinstance(top_repeated, dict):
+        value = top_repeated.get(f"{key}_mean")
+        if value != "" and value is not None:
+            return value
+    if isinstance(split_metrics, dict):
+        split_repeated = split_metrics.get(f"{segment}_repeated")
+        if isinstance(split_repeated, dict):
+            value = split_repeated.get(f"{key}_mean")
+            if value != "" and value is not None:
+                return value
+        split_values = split_metrics.get(segment)
+        if isinstance(split_values, dict):
+            value = split_values.get(key)
+            if value != "" and value is not None:
+                return value
+    return ""
 
 def _aggregate_all_runs_metric_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -1464,22 +1163,12 @@ def _write_all_runs_metrics_csv(path: Path, rows: list[dict[str, Any]]) -> None:
     with path.open("w", encoding="utf-8", newline="") as fh:
         writer = csv.DictWriter(fh, fieldnames=RUN_METRIC_CSV_FIELDS)
         writer.writeheader()
-        for row in sorted(
-            rows,
-            key=lambda r: (
-                str(r.get("group_index", "")),
-                str(r.get("case_name", "")),
-                str(r.get("job_id", "")),
-            ),
-        ):
+        for row in sorted(rows, key=lambda r: (str(r.get("group_index", "")), str(r.get("case_name", "")), str(r.get("job_id", "")))):
             writer.writerow(row)
 
 
 def _write_all_runs_plots(output_dir: Path, rows: list[dict[str, Any]]) -> list[str]:
     try:
-        import matplotlib
-
-        matplotlib.use("Agg", force=True)
         import matplotlib.pyplot as plt
     except Exception:
         return []
@@ -1618,8 +1307,6 @@ def _write_csv(path: Path, jobs: list[ChildJob]) -> None:
                 "elapsed",
                 "failure_reason",
                 "config_path",
-                "log_path",
-                "execution_manifest_path",
             ],
         )
         writer.writeheader()
@@ -1641,8 +1328,6 @@ def _write_csv(path: Path, jobs: list[ChildJob]) -> None:
                     "elapsed": j.elapsed,
                     "failure_reason": j.failure_reason or "",
                     "config_path": j.config_path or "",
-                    "log_path": j.log_path or "",
-                    "execution_manifest_path": j.execution_manifest_path or "",
                 }
             )
 
@@ -1678,121 +1363,6 @@ def _print_summary(
     print(f"Report directory: {output_dir}")
 
 
-def _write_analysis_outputs(
-    *,
-    run_label: str,
-    jobs: list[ChildJob],
-    mapping_mismatch: bool,
-    output_dir: Path,
-    report: dict[str, Any],
-    overfit_threshold: float,
-    underfit_threshold_r2: float,
-    underfit_threshold_auc: float,
-) -> None:
-    json_path = output_dir / "report.json"
-    csv_path = output_dir / "jobs.csv"
-    failed_cfg_path = output_dir / "failed_case_configs.txt"
-    failed_job_path = output_dir / "failed_job_ids.txt"
-    raw_gap_csv_path = output_dir / "generalization_gaps_by_execution.csv"
-    gap_csv_path = output_dir / "generalization_gaps.csv"
-    model_gap_csv_path = output_dir / "generalization_gap_by_model.csv"
-    overfit_plot_path = output_dir / "generalization_gap_plot.png"
-    overfit_cfg_path = output_dir / "overfit_case_configs.txt"
-    underfit_cfg_path = output_dir / "underfit_case_configs.txt"
-    raw_all_runs_metrics_path = output_dir / "all_runs_metrics_by_execution.csv"
-    all_runs_metrics_path = output_dir / "all_runs_metrics.csv"
-
-    raw_all_runs_metric_rows = _build_all_runs_metric_rows(jobs)
-    all_runs_metric_rows = _aggregate_all_runs_metric_rows(raw_all_runs_metric_rows)
-    config_summary = _summarize_scientific_configs(all_runs_metric_rows)
-    raw_overfit_records = _build_generalization_records(
-        jobs=jobs,
-        overfit_threshold=overfit_threshold,
-        underfit_threshold_r2=underfit_threshold_r2,
-        underfit_threshold_auc=underfit_threshold_auc,
-    )
-    overfit_records = _aggregate_generalization_records(
-        records=raw_overfit_records,
-        overfit_threshold=overfit_threshold,
-        underfit_threshold_r2=underfit_threshold_r2,
-        underfit_threshold_auc=underfit_threshold_auc,
-        config_summary=config_summary,
-    )
-    complete_overfit_records = [
-        r for r in overfit_records if r.slice_count > 0 and r.completed_slices == r.slice_count
-    ]
-    _write_generalization_csv(raw_gap_csv_path, raw_overfit_records)
-    _write_generalization_csv(gap_csv_path, overfit_records)
-    _write_model_gap_summary(model_gap_csv_path, complete_overfit_records)
-    _write_generalization_plot(overfit_plot_path, complete_overfit_records, overfit_threshold)
-    _write_all_runs_metrics_csv(raw_all_runs_metrics_path, raw_all_runs_metric_rows)
-    _write_all_runs_metrics_csv(all_runs_metrics_path, all_runs_metric_rows)
-    all_runs_plot_paths = _write_all_runs_plots(output_dir=output_dir, rows=all_runs_metric_rows)
-
-    report["generalization"] = {
-        "overfit_threshold": overfit_threshold,
-        "underfit_threshold_r2": underfit_threshold_r2,
-        "underfit_threshold_auc": underfit_threshold_auc,
-        "records_by_execution": len(raw_overfit_records),
-        "records_analyzed": len(overfit_records),
-        "records_complete": len(complete_overfit_records),
-        "records_partial_or_incomplete": len(overfit_records) - len(complete_overfit_records),
-        "overfit_count": sum(1 for r in complete_overfit_records if r.overfit_flag),
-        "underfit_count": sum(1 for r in complete_overfit_records if r.underfit_flag),
-        "generalization_gaps_by_execution_csv": str(raw_gap_csv_path),
-        "generalization_gaps_csv": str(gap_csv_path),
-        "generalization_gap_by_model_csv": str(model_gap_csv_path),
-        "generalization_gap_plot": str(overfit_plot_path),
-    }
-    report["all_runs_metrics_by_execution_csv"] = str(raw_all_runs_metrics_path)
-    report["all_runs_metrics_csv"] = str(all_runs_metrics_path)
-    report["all_runs_plot_paths"] = all_runs_plot_paths
-
-    overfit_cfg_lines = sorted(
-        {
-            path
-            for r in complete_overfit_records
-            if r.overfit_flag
-            for path in (r.config_paths or ((r.config_path,) if r.config_path else ()))
-            if path
-        }
-    )
-    underfit_cfg_lines = sorted(
-        {
-            path
-            for r in complete_overfit_records
-            if r.underfit_flag
-            for path in (r.config_paths or ((r.config_path,) if r.config_path else ()))
-            if path
-        }
-    )
-    overfit_cfg_path.write_text(
-        "\n".join(overfit_cfg_lines) + ("\n" if overfit_cfg_lines else ""),
-        encoding="utf-8",
-    )
-    underfit_cfg_path.write_text(
-        "\n".join(underfit_cfg_lines) + ("\n" if underfit_cfg_lines else ""),
-        encoding="utf-8",
-    )
-
-    json_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
-    _write_csv(csv_path, jobs)
-
-    failed = [j for j in jobs if j.state != "COMPLETED"]
-    failed_cfg_lines = [j.config_path for j in failed if j.config_path]
-    failed_job_lines = [j.job_id for j in failed]
-    failed_cfg_path.write_text(
-        "\n".join(failed_cfg_lines) + ("\n" if failed_cfg_lines else ""),
-        encoding="utf-8",
-    )
-    failed_job_path.write_text(
-        "\n".join(failed_job_lines) + ("\n" if failed_job_lines else ""),
-        encoding="utf-8",
-    )
-
-    _print_summary(run_label, jobs, mapping_mismatch, output_dir, complete_overfit_records)
-
-
 def main() -> int:
     args = _parse_args()
     if str(args.all_runs_csv).strip():
@@ -1815,80 +1385,6 @@ def main() -> int:
         for p in plot_paths:
             print(p)
         return 0
-
-    backend = str(args.backend).strip().lower() or "slurm"
-    if backend == "local":
-        doe_dir = Path(args.doe_dir)
-        output_dir = (
-            Path(args.output_dir)
-            if str(args.output_dir).strip()
-            else doe_dir / "analysis_local"
-        )
-        output_dir.mkdir(parents=True, exist_ok=True)
-        manifest_path = doe_dir / "manifest.jsonl"
-        if not manifest_path.exists():
-            print(f"Missing manifest: {manifest_path}", file=sys.stderr)
-            return 2
-        execution_manifest_path = (
-            Path(args.execution_manifest)
-            if str(args.execution_manifest).strip()
-            else doe_dir / "execution_manifest.jsonl"
-        )
-        if str(args.execution_manifest).strip() and not execution_manifest_path.exists():
-            print(f"Missing execution manifest: {execution_manifest_path}", file=sys.stderr)
-            return 2
-        execution_attempts = _load_execution_attempt_records(execution_manifest_path)
-        valid_manifest_records = _load_valid_manifest_records(manifest_path)
-        jobs = _build_local_jobs(
-            valid_manifest_records,
-            doe_dir=doe_dir,
-            execution_attempts=execution_attempts,
-            execution_manifest_path=execution_manifest_path
-            if execution_manifest_path.exists()
-            else None,
-        )
-        jobs = _mark_missing_metric_jobs(jobs)
-        attempt_state_counts = Counter(
-            str(attempt.get("state", "")).strip() or "UNKNOWN"
-            for attempt in execution_attempts
-        )
-        report = {
-            "generated_at_utc": datetime.now(timezone.utc).isoformat(),
-            "backend": "local",
-            "run_label": "local",
-            "doe_dir": str(doe_dir),
-            "manifest_path": str(manifest_path),
-            "parent_manifest_path": str(doe_dir / "parent_manifest.jsonl"),
-            "execution_manifest_path": str(execution_manifest_path)
-            if execution_manifest_path.exists()
-            else "",
-            "execution_count": len(jobs),
-            "child_job_count_from_log": len(jobs),
-            "local_attempt_count": len(execution_attempts),
-            "local_success_count": int(attempt_state_counts.get("COMPLETED", 0)),
-            "local_failed_count": int(attempt_state_counts.get("FAILED", 0)),
-            "local_skipped_count": int(attempt_state_counts.get("SKIPPED", 0)),
-            "valid_config_count_from_manifest": len(valid_manifest_records),
-            "mapping_mismatch": False,
-            "state_counts": dict(Counter(j.state for j in jobs)),
-            "failure_reason_counts": dict(Counter(j.failure_reason for j in jobs if j.failure_reason)),
-            "jobs": [j.__dict__ for j in jobs],
-        }
-        _write_analysis_outputs(
-            run_label="local",
-            jobs=jobs,
-            mapping_mismatch=False,
-            output_dir=output_dir,
-            report=report,
-            overfit_threshold=float(args.overfit_threshold),
-            underfit_threshold_r2=float(args.underfit_threshold_r2),
-            underfit_threshold_auc=float(args.underfit_threshold_auc),
-        )
-        return 0
-
-    if not str(args.orchestrator_job_id).strip():
-        print("--orchestrator-job-id is required when --backend slurm.", file=sys.stderr)
-        return 2
 
     orch_id = str(args.orchestrator_job_id).strip()
     logs_dir = Path(args.logs_dir)
@@ -1943,21 +1439,19 @@ def main() -> int:
     for job_id in child_ids:
         row = root_rows.get(job_id)
         if row is None:
-            manifest_record = manifest_by_job_id.get(job_id) or {}
             jobs.append(
                 ChildJob(
                     job_id=job_id,
-                    case_name=_parse_case_name(manifest_record.get("config_path")),
-                    parent_case_id=str(manifest_record.get("parent_case_id", "")).strip() or None,
-                    config_path=manifest_record.get("config_path"),
+                    case_name=_parse_case_name((manifest_by_job_id.get(job_id) or {}).get("config_path")),
+                    parent_case_id=str((manifest_by_job_id.get(job_id) or {}).get("parent_case_id", "")).strip() or None,
+                    config_path=(manifest_by_job_id.get(job_id) or {}).get("config_path"),
                     profile=None,
                     model_type=None,
-                    scaler=_infer_scaler_from_config_path(manifest_record.get("config_path")),
+                    scaler=_infer_scaler_from_config_path((manifest_by_job_id.get(job_id) or {}).get("config_path")),
                     split_mode=None,
                     split_strategy=None,
-                    scientific_config_id=str(manifest_record.get("scientific_config_id", "")).strip()
-                    or None,
-                    execution_label=str(manifest_record.get("execution_label", "")).strip() or None,
+                    scientific_config_id=str((manifest_by_job_id.get(job_id) or {}).get("scientific_config_id", "")).strip() or None,
+                    execution_label=str((manifest_by_job_id.get(job_id) or {}).get("execution_label", "")).strip() or None,
                     state="UNKNOWN",
                     exit_code="",
                     elapsed="",
@@ -1992,11 +1486,8 @@ def main() -> int:
             )
         )
 
-    jobs = _mark_missing_metric_jobs(jobs)
-
     report = {
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
-        "backend": "slurm",
         "orchestrator_job_id": orch_id,
         "logs_dir": str(logs_dir),
         "doe_dir": str(doe_dir),
@@ -2011,16 +1502,78 @@ def main() -> int:
         "jobs": [j.__dict__ for j in jobs],
     }
 
-    _write_analysis_outputs(
-        run_label=orch_id,
+    json_path = output_dir / "report.json"
+    csv_path = output_dir / "jobs.csv"
+    failed_cfg_path = output_dir / "failed_case_configs.txt"
+    failed_job_path = output_dir / "failed_job_ids.txt"
+    raw_gap_csv_path = output_dir / "generalization_gaps_by_execution.csv"
+    gap_csv_path = output_dir / "generalization_gaps.csv"
+    model_gap_csv_path = output_dir / "generalization_gap_by_model.csv"
+    overfit_plot_path = output_dir / "generalization_gap_plot.png"
+    overfit_cfg_path = output_dir / "overfit_case_configs.txt"
+    underfit_cfg_path = output_dir / "underfit_case_configs.txt"
+    raw_all_runs_metrics_path = output_dir / "all_runs_metrics_by_execution.csv"
+    all_runs_metrics_path = output_dir / "all_runs_metrics.csv"
+
+    raw_all_runs_metric_rows = _build_all_runs_metric_rows(jobs)
+    all_runs_metric_rows = _aggregate_all_runs_metric_rows(raw_all_runs_metric_rows)
+    config_summary = _summarize_scientific_configs(all_runs_metric_rows)
+    raw_overfit_records = _build_generalization_records(
         jobs=jobs,
-        mapping_mismatch=mapping_mismatch,
-        output_dir=output_dir,
-        report=report,
         overfit_threshold=float(args.overfit_threshold),
         underfit_threshold_r2=float(args.underfit_threshold_r2),
         underfit_threshold_auc=float(args.underfit_threshold_auc),
     )
+    overfit_records = _aggregate_generalization_records(
+        records=raw_overfit_records,
+        overfit_threshold=float(args.overfit_threshold),
+        underfit_threshold_r2=float(args.underfit_threshold_r2),
+        underfit_threshold_auc=float(args.underfit_threshold_auc),
+        config_summary=config_summary,
+    )
+    complete_overfit_records = [r for r in overfit_records if r.slice_count > 0 and r.completed_slices == r.slice_count]
+    _write_generalization_csv(raw_gap_csv_path, raw_overfit_records)
+    _write_generalization_csv(gap_csv_path, overfit_records)
+    _write_model_gap_summary(model_gap_csv_path, complete_overfit_records)
+    _write_generalization_plot(overfit_plot_path, complete_overfit_records, float(args.overfit_threshold))
+    _write_all_runs_metrics_csv(raw_all_runs_metrics_path, raw_all_runs_metric_rows)
+    _write_all_runs_metrics_csv(all_runs_metrics_path, all_runs_metric_rows)
+    all_runs_plot_paths = _write_all_runs_plots(output_dir=output_dir, rows=all_runs_metric_rows)
+
+    report["generalization"] = {
+        "overfit_threshold": float(args.overfit_threshold),
+        "underfit_threshold_r2": float(args.underfit_threshold_r2),
+        "underfit_threshold_auc": float(args.underfit_threshold_auc),
+        "records_by_execution": len(raw_overfit_records),
+        "records_analyzed": len(overfit_records),
+        "records_complete": len(complete_overfit_records),
+        "records_partial_or_incomplete": len(overfit_records) - len(complete_overfit_records),
+        "overfit_count": sum(1 for r in complete_overfit_records if r.overfit_flag),
+        "underfit_count": sum(1 for r in complete_overfit_records if r.underfit_flag),
+        "generalization_gaps_by_execution_csv": str(raw_gap_csv_path),
+        "generalization_gaps_csv": str(gap_csv_path),
+        "generalization_gap_by_model_csv": str(model_gap_csv_path),
+        "generalization_gap_plot": str(overfit_plot_path),
+    }
+    report["all_runs_metrics_by_execution_csv"] = str(raw_all_runs_metrics_path)
+    report["all_runs_metrics_csv"] = str(all_runs_metrics_path)
+    report["all_runs_plot_paths"] = all_runs_plot_paths
+
+    overfit_cfg_lines = sorted({path for r in complete_overfit_records if r.overfit_flag for path in (r.config_paths or ((r.config_path,) if r.config_path else ())) if path})
+    underfit_cfg_lines = sorted({path for r in complete_overfit_records if r.underfit_flag for path in (r.config_paths or ((r.config_path,) if r.config_path else ())) if path})
+    overfit_cfg_path.write_text("\n".join(overfit_cfg_lines) + ("\n" if overfit_cfg_lines else ""), encoding="utf-8")
+    underfit_cfg_path.write_text("\n".join(underfit_cfg_lines) + ("\n" if underfit_cfg_lines else ""), encoding="utf-8")
+
+    json_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
+    _write_csv(csv_path, jobs)
+
+    failed = [j for j in jobs if j.state != "COMPLETED"]
+    failed_cfg_lines = [j.config_path for j in failed if j.config_path]
+    failed_job_lines = [j.job_id for j in failed]
+    failed_cfg_path.write_text("\n".join(failed_cfg_lines) + ("\n" if failed_cfg_lines else ""), encoding="utf-8")
+    failed_job_path.write_text("\n".join(failed_job_lines) + ("\n" if failed_job_lines else ""), encoding="utf-8")
+
+    _print_summary(orch_id, jobs, mapping_mismatch, output_dir, complete_overfit_records)
     return 0
 
 

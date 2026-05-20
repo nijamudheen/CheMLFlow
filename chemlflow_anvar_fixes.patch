@@ -1,0 +1,334 @@
+diff --git a/MLModels/training/timeseries_nvar.py b/MLModels/training/timeseries_nvar.py
+index f86037e..5b590f2 100755
+--- a/MLModels/training/timeseries_nvar.py
++++ b/MLModels/training/timeseries_nvar.py
+@@ -1010,11 +1010,20 @@ def train_timeseries_nvar(
+ 
+ 
+ def _horizon_mean_std(rows: list[dict[str, Any]], horizons: tuple[int, ...]) -> dict[str, Any]:
+-    """Return mean/std over repeated final runs for each horizon key."""
++    """Return mean/std over repeated final runs for each horizon key.
++
++    `rows` is intentionally a flat list with keys such as `rmse_h25` or
++    `val_rmse_h25`, so the same helper can summarize test, validation, and
++    train repetitions by passing the corresponding row subset.
++    """
+     out: dict[str, Any] = {}
+     for h in horizons:
+         key = f"rmse_h{h}"
+-        vals = [float(row[key]) for row in rows if key in row and row[key] is not None and np.isfinite(row[key])]
++        vals = [
++            float(row[key])
++            for row in rows
++            if key in row and row[key] is not None and np.isfinite(row[key])
++        ]
+         if vals:
+             out[f"{key}_mean"] = float(np.mean(vals))
+             out[f"{key}_std"] = float(np.std(vals, ddof=1)) if len(vals) > 1 else 0.0
+@@ -1023,6 +1032,32 @@ def _horizon_mean_std(rows: list[dict[str, Any]], horizons: tuple[int, ...]) ->
+     return out
+ 
+ 
++def _prefixed_horizon_mean_std(
++    rows: list[dict[str, Any]],
++    horizons: tuple[int, ...],
++    *,
++    prefix: str,
++) -> dict[str, Any]:
++    """Summarize repeated horizon metrics stored with a prefix.
++
++    Example: prefix="val_" consumes keys like `val_rmse_h25` and writes
++    canonical keys like `rmse_h25_mean`, making the output shape identical for
++    train/val/test repeated summaries.
++    """
++    normalized_rows: list[dict[str, Any]] = []
++    for row in rows:
++        normalized: dict[str, Any] = {
++            "run_index": row.get("run_index"),
++            "seed": row.get("seed"),
++        }
++        for h in horizons:
++            src = f"{prefix}rmse_h{h}"
++            if src in row:
++                normalized[f"rmse_h{h}"] = row[src]
++        normalized_rows.append(normalized)
++    return _horizon_mean_std(normalized_rows, horizons)
++
++
+ def _train_timeseries_nvar_repeated_final(
+     *,
+     model_type: str,
+@@ -1081,6 +1116,7 @@ def _train_timeseries_nvar_repeated_final(
+         ["run_index", "seed", "wall_seconds"]
+         + [f"rmse_h{h}" for h in cfg0.horizons]
+         + [f"val_rmse_h{h}" for h in cfg0.horizons]
++        + [f"train_rmse_h{h}" for h in cfg0.horizons]
+     )
+ 
+     import time as _time
+@@ -1126,11 +1162,13 @@ def _train_timeseries_nvar_repeated_final(
+             payload = json.load(f)
+         test_metrics = payload.get("test_rmse_horizons", {}) or {}
+         val_metrics = payload.get("val_rmse_horizons", {}) or {}
++        train_metrics = payload.get("train_rmse_horizons", {}) or {}
+         row = {
+             "run_index": int(run_idx),
+             "seed": int(run_seed),
+             **{k: float(v) for k, v in test_metrics.items() if isinstance(v, (int, float))},
+             **{f"val_{k}": float(v) for k, v in val_metrics.items() if isinstance(v, (int, float))},
++            **{f"train_{k}": float(v) for k, v in train_metrics.items() if isinstance(v, (int, float))},
+         }
+         run_rows.append(row)
+ 
+@@ -1147,6 +1185,11 @@ def _train_timeseries_nvar_repeated_final(
+                 key = f"val_{k}"
+                 if key in csv_row:
+                     csv_row[key] = float(v)
++        for k, v in train_metrics.items():
++            if isinstance(v, (int, float)):
++                key = f"train_{k}"
++                if key in csv_row:
++                    csv_row[key] = float(v)
+         with open(progress_csv, "a", newline="", encoding="utf-8") as fh:
+             csv.DictWriter(fh, fieldnames=progress_fieldnames).writerow(csv_row)
+ 
+@@ -1155,19 +1198,33 @@ def _train_timeseries_nvar_repeated_final(
+         # killed mid-sweep. `partial: true` flags this clearly; the post-loop
+         # rewrite below sets it to false when num_runs runs have all landed.
+         try:
+-            partial_stats = _horizon_mean_std(run_rows, cfg0.horizons)
++            partial_test_stats = _horizon_mean_std(run_rows, cfg0.horizons)
++            partial_val_stats = _prefixed_horizon_mean_std(run_rows, cfg0.horizons, prefix="val_")
++            partial_train_stats = _prefixed_horizon_mean_std(run_rows, cfg0.horizons, prefix="train_")
+             with open(first_result.metrics_path, "r", encoding="utf-8") as f:
+                 snapshot = json.load(f)
+             snapshot["rmse_single_run"] = snapshot.get(
+                 "rmse_single_run", snapshot.get("rmse")
+             )
+-            snapshot["rmse"] = partial_stats.get(
++            snapshot["rmse"] = partial_test_stats.get(
+                 f"{primary_key}_mean", snapshot.get("rmse")
+             )
+-            snapshot["rmse_std"] = partial_stats.get(f"{primary_key}_std")
++            snapshot["rmse_std"] = partial_test_stats.get(f"{primary_key}_std")
+             snapshot["test_num_runs"] = int(run_idx + 1)
+             snapshot["test_num_runs_target"] = int(num_runs)
+-            snapshot["test_rmse_horizons_repeated"] = partial_stats
++            snapshot["test_rmse_horizons_repeated"] = partial_test_stats
++            snapshot["val_rmse_horizons_repeated"] = partial_val_stats
++            snapshot["train_rmse_horizons_repeated"] = partial_train_stats
++            # Convenience flat fields for benchmarking scripts.
++            for h in cfg0.horizons:
++                for suffix in ("mean", "std"):
++                    k = f"rmse_h{h}_{suffix}"
++                    if k in partial_test_stats:
++                        snapshot[f"test_{k}"] = partial_test_stats[k]
++                    if k in partial_val_stats:
++                        snapshot[f"val_{k}"] = partial_val_stats[k]
++                    if k in partial_train_stats:
++                        snapshot[f"train_{k}"] = partial_train_stats[k]
+             snapshot["partial"] = True
+             if optuna_summary is not None:
+                 snapshot["tuning"] = optuna_summary
+@@ -1188,13 +1245,15 @@ def _train_timeseries_nvar_repeated_final(
+             wall_seconds,
+             primary_key,
+             row.get(primary_key, float("nan")),
+-            partial_stats.get(f"{primary_key}_mean", float("nan")),
+-            partial_stats.get(f"{primary_key}_std", float("nan")),
++            partial_test_stats.get(f"{primary_key}_mean", float("nan")),
++            partial_test_stats.get(f"{primary_key}_std", float("nan")),
+         )
+ 
+     assert first_result is not None
+ 
+     test_stats = _horizon_mean_std(run_rows, cfg0.horizons)
++    val_stats = _prefixed_horizon_mean_std(run_rows, cfg0.horizons, prefix="val_")
++    train_stats = _prefixed_horizon_mean_std(run_rows, cfg0.horizons, prefix="train_")
+     rmse_mean_key = f"{primary_key}_mean"
+     rmse_std_key = f"{primary_key}_std"
+ 
+@@ -1209,6 +1268,17 @@ def _train_timeseries_nvar_repeated_final(
+     main_metrics["test_num_runs"] = int(num_runs)
+     main_metrics["test_num_runs_target"] = int(num_runs)
+     main_metrics["test_rmse_horizons_repeated"] = test_stats
++    main_metrics["val_rmse_horizons_repeated"] = val_stats
++    main_metrics["train_rmse_horizons_repeated"] = train_stats
++    for h in cfg0.horizons:
++        for suffix in ("mean", "std"):
++            k = f"rmse_h{h}_{suffix}"
++            if k in test_stats:
++                main_metrics[f"test_{k}"] = test_stats[k]
++            if k in val_stats:
++                main_metrics[f"val_{k}"] = val_stats[k]
++            if k in train_stats:
++                main_metrics[f"train_{k}"] = train_stats[k]
+     main_metrics["partial"] = False
+     if optuna_summary is not None:
+         main_metrics["tuning"] = optuna_summary
+@@ -1220,7 +1290,29 @@ def _train_timeseries_nvar_repeated_final(
+     if split_metrics_path and os.path.exists(split_metrics_path):
+         with open(split_metrics_path, "r", encoding="utf-8") as f:
+             split_metrics = json.load(f)
++        split_metrics["test_single_run"] = split_metrics.get("test", {})
++        split_metrics["val_single_run"] = split_metrics.get("val", {})
++        split_metrics["train_single_run"] = split_metrics.get("train", {})
+         split_metrics["test_repeated"] = test_stats
++        split_metrics["val_repeated"] = val_stats
++        split_metrics["train_repeated"] = train_stats
++        # Use repeated means as the canonical benchmark values while retaining
++        # the original first-run values above.
++        split_metrics["test"] = {
++            f"rmse_h{h}": test_stats.get(f"rmse_h{h}_mean")
++            for h in cfg0.horizons
++            if test_stats.get(f"rmse_h{h}_mean") is not None
++        }
++        split_metrics["val"] = {
++            f"rmse_h{h}": val_stats.get(f"rmse_h{h}_mean")
++            for h in cfg0.horizons
++            if val_stats.get(f"rmse_h{h}_mean") is not None
++        }
++        split_metrics["train"] = {
++            f"rmse_h{h}": train_stats.get(f"rmse_h{h}_mean")
++            for h in cfg0.horizons
++            if train_stats.get(f"rmse_h{h}_mean") is not None
++        }
+         with open(split_metrics_path, "w", encoding="utf-8") as f:
+             json.dump(split_metrics, f, indent=2, default=_json_default)
+ 
+diff --git a/analysis.py b/analysis.py
+index e139f02..ca13612 100755
+--- a/analysis.py
++++ b/analysis.py
+@@ -75,6 +75,12 @@ class GeneralizationRecord:
+     run_dirs: tuple[str, ...] = ()
+ 
+ 
++HORIZON_RMSE_FIELDS = [
++    f"{segment}_rmse_h{h}"
++    for segment in ("train", "val", "test")
++    for h in (25, 50, 75, 100)
++]
++
+ METRIC_FIELDS = [
+     "r2",
+     "mae",
+@@ -108,7 +114,7 @@ METRIC_FIELDS = [
+     "train_f1",
+     "test_f1",
+     "val_f1",
+-]
++] + HORIZON_RMSE_FIELDS
+ 
+ 
+ RUN_METRIC_CSV_FIELDS = [
+@@ -1004,6 +1010,13 @@ def _build_all_runs_metric_rows(jobs: list[ChildJob]) -> list[dict[str, Any]]:
+                 "train_f1": train_split.get("f1", ""),
+                 "test_f1": test_split.get("f1", ""),
+                 "val_f1": val_split.get("f1", ""),
++                **{
++                    f"{segment}_rmse_h{h}": _pick_horizon_metric(
++                        segment, h, split_metrics, top_metrics
++                    )
++                    for segment in ("train", "val", "test")
++                    for h in (25, 50, 75, 100)
++                },
+             }
+         )
+         for metric_field in METRIC_FIELDS:
+@@ -1012,6 +1025,42 @@ def _build_all_runs_metric_rows(jobs: list[ChildJob]) -> list[dict[str, Any]]:
+     return rows
+ 
+ 
++
++
++def _pick_horizon_metric(
++    segment: str,
++    horizon: int,
++    split_metrics: dict[str, Any] | None,
++    top_metrics: dict[str, Any] | None,
++) -> Any:
++    """Pick the best available RMSE@horizon value for analysis CSVs.
++
++    Preference order:
++    1. repeated final-test mean from metrics.json,
++    2. repeated mean from split_metrics.json,
++    3. canonical split value (which may already be the repeated mean after the
++       time-series trainer finishes all final runs).
++    """
++    key = f"rmse_h{horizon}"
++    repeated_name = f"{segment}_rmse_horizons_repeated"
++    top_repeated = (top_metrics or {}).get(repeated_name)
++    if isinstance(top_repeated, dict):
++        value = top_repeated.get(f"{key}_mean")
++        if value != "" and value is not None:
++            return value
++    if isinstance(split_metrics, dict):
++        split_repeated = split_metrics.get(f"{segment}_repeated")
++        if isinstance(split_repeated, dict):
++            value = split_repeated.get(f"{key}_mean")
++            if value != "" and value is not None:
++                return value
++        split_values = split_metrics.get(segment)
++        if isinstance(split_values, dict):
++            value = split_values.get(key)
++            if value != "" and value is not None:
++                return value
++    return ""
++
+ def _aggregate_all_runs_metric_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+     grouped: dict[str, list[dict[str, Any]]] = defaultdict(list)
+     for row in rows:
+diff --git a/submit_gpu.sb b/submit_gpu.sb
+index 1334a07..08496d6 100755
+--- a/submit_gpu.sb
++++ b/submit_gpu.sb
+@@ -121,7 +121,23 @@ if source.get("type") in {"local_csv", "local_npy", "local_npz"} and "path" in s
+ Path(dst).write_text(yaml.safe_dump(spec, sort_keys=False), encoding="utf-8")
+ print(f"Wrote runtime DOE: {dst}")
+ print(f"Resolved dataset path: {source.get('path')}")
++print("Source DOE train.tuning.n_trials:", spec.get("defaults", {}).get("train.tuning.n_trials"))
+ PY
++
++echo "=== DOE RUNTIME CHECK ==="
++"$PY" - "$DOE_RUN" <<'PY'
++import sys, yaml
++from pathlib import Path
++spec = yaml.safe_load(Path(sys.argv[1]).read_text(encoding="utf-8")) or {}
++print("Runtime DOE train.tuning.n_trials:", (spec.get("defaults") or {}).get("train.tuning.n_trials"))
++PY
++
++# Remove generated files from a previous DOE shape before regenerating.
++# The manifest is rewritten below, but clearing old case YAMLs prevents
++# accidental manual submission of stale configs that still contain old values
++# such as train.tuning.n_trials=30.
++rm -f "$DOE_OUT"/case_*.yaml "$DOE_OUT"/manifest.jsonl "$DOE_OUT"/parent_manifest.jsonl "$DOE_OUT"/summary.json
++
+ ###############################################################################
+ # Generate DOE cases (writes manifest.jsonl into DOE_OUT)
+ ###############################################################################
+@@ -157,6 +173,24 @@ PY
+ 
+ echo "Valid DOE cases: ${#VALID_CONFIGS[@]}"
+ 
++echo "=== GENERATED CASE CHECK ==="
++"$PY" - "$MANIFEST" <<'PY'
++import json, sys, yaml
++from pathlib import Path
++for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
++    if not line.strip():
++        continue
++    rec = json.loads(line)
++    if str(rec.get("status", "")).lower() != "valid":
++        continue
++    cfg_path = rec.get("config_path")
++    if not cfg_path:
++        continue
++    cfg = yaml.safe_load(Path(cfg_path).read_text(encoding="utf-8")) or {}
++    n_trials = (((cfg.get("train") or {}).get("tuning") or {}).get("n_trials"))
++    print(f"{Path(cfg_path).name}: train.tuning.n_trials={n_trials}")
++PY
++
+ if [[ "$SUBMIT_CHILD_JOBS" == "0" ]]; then
+   echo "DOE-only mode: skipping child job submission."
+   exit 0

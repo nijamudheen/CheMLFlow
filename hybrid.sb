@@ -1,0 +1,243 @@
+#!/bin/bash --login
+#SBATCH --job-name=A-NVAR_doe
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=1
+#SBATCH --mem=2G
+#SBATCH --time=00:20:00
+#SBATCH -A mendoza_q
+#SBATCH --exclude=amr-163,amr-178,amr-179
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=susanalopezmoreno@gmail.com
+#SBATCH --output=%x-%j.out
+#SBATCH --error=%x-%j.err
+
+set -euo pipefail
+
+# ------------------------------------------------------------------
+# Environment Activation (Fixed from Script 2 to avoid library crashes)
+# ------------------------------------------------------------------
+unset PYTHONPATH
+module purge >/dev/null 2>&1 || true
+
+# Load Conda explicitly to export vital C-libraries (LD_LIBRARY_PATH)
+module load Conda
+
+# Define paths and activate environment cleanly
+CONDA_BASE="/mnt/home/k0115547/miniconda3"
+ENV_NAME="chemlflow_env_py312"
+
+if [[ -f "$CONDA_BASE/etc/profile.d/conda.sh" ]]; then
+    source "$CONDA_BASE/etc/profile.d/conda.sh"
+else
+    echo "Conda profile script not found at $CONDA_BASE/etc/profile.d/conda.sh" >&2
+    exit 2
+fi
+
+conda activate "$ENV_NAME"
+PYTHON_BIN="$(command -v python)"
+
+if [[ -z "$PYTHON_BIN" ]]; then
+    echo "No python executable found after conda activate $ENV_NAME" >&2
+    exit 2
+fi
+
+# ------------------------------------------------------------------
+# Workspace Layout
+# ------------------------------------------------------------------
+RUN_PROJECT_DIR="/mnt/ufs18/rs-049/Workflow_ML_Chemistry/CheMLFlow-main"
+LOG_DIR="$RUN_PROJECT_DIR/logs"
+DOE_SRC="$RUN_PROJECT_DIR/config/doe_timeseries.yaml"
+DOE_RUN="$RUN_PROJECT_DIR/doe_timeseries.runtime.yaml"
+DOE_OUT="${DOE_OUT_DIR:-$RUN_PROJECT_DIR/A-NVAR_doe}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-$RUN_PROJECT_DIR/output}"
+SUBMIT_CHILD_JOBS="${SUBMIT_CHILD_JOBS:-1}"
+
+# Child Job GPU configuration overrides
+GPU_TYPE="${GPU_TYPE:-a100}"
+GPU_COUNT="${GPU_COUNT:-1}"
+
+###############################################################################
+# Sanity checks + dirs
+###############################################################################
+mkdir -p "$LOG_DIR" "$DOE_OUT" "$OUTPUT_ROOT"
+
+if [[ ! -f "$DOE_SRC" ]]; then
+    echo "DOE source not found: $DOE_SRC" >&2
+    exit 2
+fi
+if [[ ! -f "$RUN_PROJECT_DIR/scripts/generate_doe.py" ]]; then
+    echo "DOE generator not found: $RUN_PROJECT_DIR/scripts/generate_doe.py" >&2
+    exit 2
+fi
+if [[ ! -f "$RUN_PROJECT_DIR/main.py" ]]; then
+    echo "Run project main.py not found: $RUN_PROJECT_DIR/main.py" >&2
+    exit 2
+fi
+
+echo "=== PYTHON CHECK (DOE master) ==="
+srun "$PYTHON_BIN" -c "import sys, yaml, sklearn; print(sys.executable); print('yaml OK'); print('sklearn', sklearn.__version__)"
+
+###############################################################################
+# Write runtime DOE YAML (Safe processing)
+###############################################################################
+"$PYTHON_BIN" - "$DOE_SRC" "$DOE_RUN" "$DOE_OUT" "$OUTPUT_ROOT" "$RUN_PROJECT_DIR" <<'PY'
+import sys
+from pathlib import Path
+import yaml
+
+src, dst, doe_out, output_root, project_dir = sys.argv[1:6]
+src_path = Path(src).resolve()
+project_dir = Path(project_dir).resolve()
+
+spec = yaml.safe_load(Path(src).read_text(encoding="utf-8"))
+
+# Safe assignment in case nested elements don't exist yet
+spec.setdefault("output", {})["dir"] = str(Path(doe_out).resolve())
+spec.setdefault("defaults", {})["global.base_dir"] = f"{Path(output_root).resolve()}/data"
+spec.setdefault("defaults", {})["global.run_dir"]  = f"{Path(output_root).resolve()}/runs"
+
+# Make dataset source path absolute
+dataset = spec.setdefault("dataset", {})
+source = dataset.setdefault("source", {})
+if source.get("type") in {"local_csv", "local_npy", "local_npz"} and "path" in source:
+    p = Path(source["path"])
+    if not p.is_absolute():
+        candidate = (src_path.parent / p).resolve()
+        if not candidate.exists():
+            candidate = (project_dir / p).resolve()
+        source["path"] = str(candidate)
+
+Path(dst).write_text(yaml.safe_dump(spec, sort_keys=False), encoding="utf-8")
+print(f"Wrote runtime DOE: {dst}")
+print(f"Resolved dataset path: {source.get('path')}")
+PY
+
+###############################################################################
+# Generate DOE cases
+###############################################################################
+cd "$RUN_PROJECT_DIR"
+"$PYTHON_BIN" scripts/generate_doe.py --doe "$DOE_RUN"
+
+MANIFEST="$DOE_OUT/manifest.jsonl"
+if [[ ! -f "$MANIFEST" ]]; then
+    echo "Manifest not found: $MANIFEST" >&2
+    exit 2
+fi
+
+mapfile -t VALID_CONFIGS < <(
+    "$PYTHON_BIN" - "$MANIFEST" <<'PY'
+import json, sys
+from pathlib import Path
+
+for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+    if not line.strip():
+        continue
+    rec = json.loads(line)
+    if str(rec.get("status", "")).lower() != "valid":
+        continue
+    cfg = rec.get("config_path")
+    if not cfg:
+        continue
+    factors = rec.get("factors") or {}
+    model = factors.get("train.model.type", "")
+    print(f"{cfg}\t{model}")
+PY
+)
+
+echo "Valid DOE cases: ${#VALID_CONFIGS[@]}"
+
+if [[ "$SUBMIT_CHILD_JOBS" == "0" ]]; then
+    echo "DOE-only mode: skipping child job submission."
+    exit 0
+fi
+
+###############################################################################
+# Submit child jobs
+###############################################################################
+DL_MODELS=(dl_simple dl_deep dl_gru dl_resmlp dl_tabtransformer dl_aereg dl_adaptive_nvar dl_connectome_nvar)
+
+for line in "${VALID_CONFIGS[@]}"; do
+    cfg="${line%%$'\t'*}"
+    model="${line#*$'\t'}"
+    case_name="$(basename "$cfg" .yaml)"
+
+    # ------------------------------------------------------------------
+    # Per-case folder isolation rewrite (Imported from Script 2)
+    # ------------------------------------------------------------------
+    CASE_RUN_DIR="$OUTPUT_ROOT/runs/$case_name"
+    mkdir -p "$CASE_RUN_DIR"
+
+    "$PYTHON_BIN" - "$cfg" "$CASE_RUN_DIR" <<'PY'
+import sys
+from pathlib import Path
+import yaml
+
+cfg_path, run_dir = sys.argv[1:3]
+p = Path(cfg_path)
+spec = yaml.safe_load(p.read_text(encoding="utf-8"))
+
+spec.setdefault("global", {})["run_dir"] = run_dir
+p.write_text(yaml.safe_dump(spec, sort_keys=False), encoding="utf-8")
+print(f"Isolated case output setup: {cfg_path} -> global.run_dir={run_dir}")
+PY
+
+    # Bind explicit GPU types (ICER safety standard from Script 1)
+    gpu_args=()
+    if [[ " ${DL_MODELS[*]} " == *" ${model} "* ]]; then
+        gpu_args+=(--gpus="${GPU_TYPE}:${GPU_COUNT}")
+    fi
+
+    sbatch "${gpu_args[@]}" \
+        --job-name="adaptive_nvar_${case_name}" \
+        --ntasks=1 \
+        --cpus-per-task=4 \
+        --mem=24G \
+        --time=08:00:00 \
+        --output="$LOG_DIR/pgp_${case_name}-%j.out" \
+        --error="$LOG_DIR/pgp_${case_name}-%j.err" \
+        --export=ALL,CHEMLFLOW_CONFIG="$cfg",RUN_PROJECT_DIR="$RUN_PROJECT_DIR",CONDA_BASE="$CONDA_BASE",ENV_NAME="$ENV_NAME" <<'EOF'
+#!/bin/bash --login
+set -euo pipefail
+
+# Re-initialize environment cleanly inside the compute node
+unset PYTHONPATH
+module purge >/dev/null 2>&1 || true
+module load Conda
+source "$CONDA_BASE/etc/profile.d/conda.sh"
+conda activate "$ENV_NAME"
+
+cd "$RUN_PROJECT_DIR"
+
+echo "=== PYTHON CHECK (child) ==="
+srun python -c "import sys; print(sys.executable)"
+
+echo "=== GPU CHECK (child) ==="
+echo "SLURM_JOB_GPUS=${SLURM_JOB_GPUS:-<unset>}"
+echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
+
+# Run safely even if nvidia-smi doesn't exist on path
+if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi -L || echo "nvidia-smi utility returned non-zero status"
+else
+    echo "nvidia-smi utility not visible on this compute partition path"
+fi
+
+python - - <<'PYCHK'
+import os, sys
+try:
+    import torch
+except Exception as e:
+    print(f"torch import failure: {e}", file=sys.stderr)
+    sys.exit(0)
+print(f"  torch.__version__         = {torch.__version__}")
+print(f"  torch.cuda.is_available() = {torch.cuda.is_available()}")
+print(f"  torch.cuda.device_count() = {torch.cuda.device_count()}")
+PYCHK
+
+echo "=== RUN (child) ==="
+echo "CHEMLFLOW_CONFIG=$CHEMLFLOW_CONFIG"
+srun python -u main.py
+EOF
+done
+
+echo "Submitted ${#VALID_CONFIGS[@]} child jobs."

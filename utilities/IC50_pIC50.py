@@ -98,7 +98,7 @@ def main(input_file, output_file_3class, output_file_2class):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Convert IC50 to pIC50 and normalize IC50 values.")
-    parser.add_argument('input_file', type=str, help="Input CSV file with bioactivity data (e.g., curated_smiles.csv).")
+    parser.add_argument('input_file', type=str, help="Input CSV file with bioactivity data (e.g., curated_smiles.csv or lipinski_results.csv).")
     parser.add_argument('output_file_3class', type=str, help="Output CSV file for 3-class bioactivity data with pIC50.")
     parser.add_argument('output_file_2class', type=str, help="Output CSV file for 2-class bioactivity data with pIC50.")
     

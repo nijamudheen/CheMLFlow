@@ -20,3 +20,12 @@ xgboost>=3.0.0
 shap>=0.47.2
 catboost>=1.2.9
 chemprop
+
+# --- Optional: dl_connectome_nvar (time-series pipeline) ---------------------
+# Only needed when training `dl_connectome_nvar`; the rest of CheMLFlow does
+# not depend on these. Uncomment or `pip install` them on demand.
+#openpyxl>=3.1
+#networkx>=3.0
+# --- Optional: tuning.method=optuna for the time-series pipeline -------------
+# Required if you set `train.tuning.method: optuna` in a time-series config.
+#optuna>=3.5

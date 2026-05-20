@@ -1,0 +1,47 @@
+dataset:
+  name: mackey_glass
+  profile: ts_forecast
+  task_type: regression
+  source:
+    type: local_npy
+    path: /mnt/ufs18/rs-049/Workflow_ML_Chemistry/CheMLFlow-NVAR/data/ground_truth.npy
+    time_axis: cols
+  split:
+    warmup_len: 500
+    train_len: 7500
+    val_len: 1000
+    test_len: 1000
+defaults:
+  global.task_type: regression
+  global.random_state: 2025
+  global.base_dir: /mnt/ufs18/rs-049/Workflow_ML_Chemistry/CheMLFlow-NVAR/output/data
+  pipeline.feature_input: none
+  train.tuning.method: optuna
+  train.tuning.n_trials: 80
+  train.tuning.trial_epoch_cap: null
+  train.model.type: dl_adaptive_nvar
+  train.model.params.weight_decay: 0.0
+  train.model.params.num_windows: 10
+  train.model.params.horizons:
+  - 25
+  - 50
+  - 75
+  - 100
+  train.model.params.optuna_num_runs: 5
+  train.model.params.test_num_runs: 25
+  train.model.params.adam_patience: 200
+  train.model.params.lbfgs_patience: 200
+  train.model.params.max_epochs_adam: 5000
+  train.model.params.num_epochs_lbfgs: 50000
+  train.model.params.device: cuda
+  global.run_dir: /mnt/ufs18/rs-049/Workflow_ML_Chemistry/CheMLFlow-NVAR/output/runs
+search_space:
+  train.model.params.dataset_noise_scale:
+  - 0.2
+  - 0.3
+  train.model.params.train_noise_scale:
+  - 0.0
+selection:
+  max_cases: null
+output:
+  dir: /mnt/ufs18/rs-049/Workflow_ML_Chemistry/CheMLFlow-NVAR/A-NVAR_doe

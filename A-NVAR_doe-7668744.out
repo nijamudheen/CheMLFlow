@@ -1,0 +1,20 @@
+=== PYTHON CHECK (DOE master) ===
+/mnt/home/k0115547/miniconda3/envs/chemlflow_env_py312/bin/python
+yaml OK
+sklearn 1.8.0
+Wrote runtime DOE: /mnt/ufs18/rs-049/Workflow_ML_Chemistry/CheMLFlow-main/doe_timeseries.runtime.yaml
+Resolved dataset path: data/ground_truth.npy
+[doe] profile=ts_forecast task=regression total=8 valid=8 skipped=0
+[doe] manifest: /mnt/ufs18/rs-049/Workflow_ML_Chemistry/CheMLFlow-main/A-NVAR_doe/manifest.jsonl
+[doe] summary : /mnt/ufs18/rs-049/Workflow_ML_Chemistry/CheMLFlow-main/A-NVAR_doe/summary.json
+{"summary_path": "/mnt/ufs18/rs-049/Workflow_ML_Chemistry/CheMLFlow-main/A-NVAR_doe/summary.json", "manifest_path": "/mnt/ufs18/rs-049/Workflow_ML_Chemistry/CheMLFlow-main/A-NVAR_doe/manifest.jsonl"}
+Valid DOE cases: 8
+Submitted batch job 7668760
+Submitted batch job 7668761
+Submitted batch job 7668762
+Submitted batch job 7668763
+Submitted batch job 7668764
+Submitted batch job 7668765
+Submitted batch job 7668766
+Submitted batch job 7668767
+Submitted 8 child jobs.

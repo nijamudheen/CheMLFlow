@@ -1,0 +1,85 @@
+{
+  "model_type": "dl_adaptive_nvar",
+  "rmse": 0.018936860049143432,
+  "primary_horizon": 100,
+  "primary_metric": "rmse_h100",
+  "split_metrics_path": "/mnt/ufs18/rs-049/Workflow_ML_Chemistry/CheMLFlow-NVAR/output/runs/a8cb76d9/case_0001/test_run_21/dl_adaptive_nvar_split_metrics.json",
+  "train_rmse_horizons": {
+    "rmse_h25": 0.009401886723935604,
+    "rmse_h50": 0.011368986824527383,
+    "rmse_h75": 0.013257730519399047,
+    "rmse_h100": 0.016276825126260518
+  },
+  "val_rmse_horizons": {
+    "rmse_h25": 0.008862212346866728,
+    "rmse_h50": 0.010817922512069344,
+    "rmse_h75": 0.012723490688949823,
+    "rmse_h100": 0.015206474345177412
+  },
+  "test_rmse_horizons": {
+    "rmse_h25": 0.010342388041317463,
+    "rmse_h50": 0.012491310480982065,
+    "rmse_h75": 0.015098721720278263,
+    "rmse_h100": 0.018936860049143432
+  },
+  "training": {
+    "adam_epochs_run": 5000,
+    "adam_best_loss": 0.0010727071203291416,
+    "lbfgs_epochs_run": 314,
+    "lbfgs_best_loss": 0.0005581756122410297
+  },
+  "config": {
+    "k": 50,
+    "hidden_dim": 50,
+    "feature_dim_m": null,
+    "n_connectome": 100,
+    "input_scaling": 0.1,
+    "lr_adam": 0.01,
+    "max_epochs_adam": 5000,
+    "adam_patience": 200,
+    "weight_decay": 0.0,
+    "lr_lbfgs": 0.5,
+    "num_epochs_lbfgs": 50000,
+    "lbfgs_patience": 200,
+    "lbfgs_max_iter": 50,
+    "lbfgs_history_size": 50,
+    "tolerance": 1e-20,
+    "train_noise_scale": 0.0,
+    "dataset_noise_scale": 0.1,
+    "horizons": [
+      25,
+      50,
+      75,
+      100
+    ],
+    "num_windows": 10,
+    "optuna_num_runs": 5,
+    "test_num_runs": 1,
+    "device": "cuda",
+    "base_seed": 2046,
+    "connectome_xlsx": null,
+    "connectome_sheet": null,
+    "connectome_mode": "connectome",
+    "connectome_selection_mode": "top_degree",
+    "connectome_selection_seed": 2025,
+    "connectome_binarize": false,
+    "connectome_normalization": "maxabs",
+    "connectome_swap_factor": 10,
+    "raw_meta": {
+      "data_source": "local_npy",
+      "path": "/mnt/ufs18/rs-049/Workflow_ML_Chemistry/CheMLFlow-NVAR/data/ground_truth.npy",
+      "shape": [
+        15001,
+        1
+      ],
+      "time_axis": "cols"
+    }
+  },
+  "split": {
+    "warmup_len": 500,
+    "train_len": 7500,
+    "val_len": 1000,
+    "test_len": 1000
+  },
+  "data_dim": 1
+}

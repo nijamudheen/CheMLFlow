@@ -61,30 +61,6 @@ CHEMLFLOW_CONFIG=config/generated/flash_doe/<case_file>.yaml python main.py
 Use the `config_path` values in `manifest.jsonl` or `ls` output rather than
 assuming a specific generated filename.
 
-Run all valid generated cases locally:
-
-```bash
-python scripts/run_doe_local.py --doe-dir config/generated/flash_doe --max-workers 1 --resume
-```
-
-This writes `execution_manifest.jsonl` and one log per case under
-`local_logs/`. It reads valid execution children from `manifest.jsonl`; CV
-designs still run as one child config per fold/repeat.
-
-Analyze local DOE runs without Slurm:
-
-```bash
-python analysis.py \
-  --backend local \
-  --doe-dir config/generated/flash_doe \
-  --output-dir config/generated/flash_doe/analysis_local
-```
-
-Local analysis reads generated configs, each config's `global.run_dir`, and
-`run_status.json`/metrics files. It writes the same core audit artifacts as the
-Slurm path, including `report.json`, `jobs.csv`, `all_runs_metrics.csv`, and
-`all_runs_metrics_by_execution.csv`.
-
 ## DOE YAML Shape
 
 Top-level keys:
@@ -151,30 +127,6 @@ Generated runtime configs are case-isolated by default. CheMLFlow scopes
 sets `global.runs.id` to the case id. Leave
 `constraints.isolate_case_artifacts: true` unless you intentionally want shared
 artifacts.
-
-## Local DOE Execution
-
-Use `scripts/run_doe_local.py` when a DOE should run on the current machine
-instead of through Slurm. The runner executes only valid execution-child records
-from `manifest.jsonl` and calls `main.py` with `CHEMLFLOW_CONFIG` set to each
-generated config path.
-
-Common options:
-
-- `--max-workers N`: run up to `N` cases concurrently.
-- `--resume`: skip configs whose `run_status.json` already says
-  `status: success`.
-- `--limit N`: run a short pilot from the valid manifest records.
-- `--dry-run`: write the execution attempt manifest without running `main.py`.
-- `--stop-on-failure`: stop after the first failed case.
-- `--allow-shared-artifacts`: allow parallel execution even when generated
-  configs share `global.run_dir` or `global.base_dir`. Use only when you know
-  shared artifacts cannot collide.
-
-After a local run, use `analysis.py --backend local`. Do not fabricate Slurm
-logs or `sacct` output for local work; local analysis combines
-`execution_manifest.jsonl` attempt records with each case's `run_status.json`
-and metrics files.
 
 ## Parent And Child Cases
 

@@ -1,0 +1,49 @@
+global:
+  pipeline_type: mackey_glass
+  task_type: regression
+  base_dir: /mnt/ufs18/rs-049/Workflow_ML_Chemistry/CheMLFlow-main/output/data/2ab828f7/case_0003
+  target_column: target
+  random_state: 2025
+  thresholds:
+    active: 1000
+    inactive: 10000
+  runs:
+    enabled: true
+    id: case_0003
+  run_dir: /mnt/ufs18/rs-049/Workflow_ML_Chemistry/CheMLFlow-main/output/runs/2ab828f7/case_0003
+pipeline:
+  nodes:
+  - get_data
+  - train.timeseries
+  feature_input: none
+get_data:
+  data_source: local_npy
+  source:
+    path: data/ground_truth.npy
+    time_axis: cols
+train:
+  model:
+    type: dl_adaptive_nvar
+    params:
+      weight_decay: 0.0
+      num_windows: 10
+      horizons:
+      - 25
+      - 50
+      - 75
+      - 100
+      adam_patience: 200
+      lbfgs_patience: 200
+      max_epochs_adam: 5000
+      num_epochs_lbfgs: 50000
+      dataset_noise_scale: 0.1
+      train_noise_scale: 0.0
+  tuning:
+    method: optuna
+    n_trials: 30
+    trial_epoch_cap: 500
+split:
+  warmup_len: 500
+  train_len: 7500
+  val_len: 1000
+  test_len: 1000

@@ -29,6 +29,7 @@ _NODE_TO_BLOCK = {
     "label.normalize": "label",
     "split": "split",
     "featurize.none": "featurize",
+    "featurize.lipinski": "featurize",
     "featurize.rdkit": "featurize",
     "featurize.rdkit_labeled": "featurize",
     "featurize.morgan": "featurize",
@@ -36,6 +37,7 @@ _NODE_TO_BLOCK = {
     "select.features": "preprocess",
     "train": "train",
     "train.tdc": "train_tdc",
+    "train.timeseries": "train",
     "analyze.stats": "analyze",
     "analyze.eda": "analyze",
 }
@@ -170,6 +172,13 @@ def collect_config_issues(config: dict[str, Any], nodes: list[str]) -> list[Vali
         block = _NODE_TO_BLOCK.get(node)
         if block:
             allowed_blocks.add(block)
+
+    # Some nodes draw from multiple top-level blocks. train.timeseries reads
+    # both `train` (model + params) and `split` (warmup/train/val/test lengths)
+    # without participating in the standard `split` node, so the `split` block
+    # is allowed even though the `split` node is forbidden in this pipeline.
+    if "train.timeseries" in nodes:
+        allowed_blocks.add("split")
 
     # Top-level block validity.
     for block in blocks_present:

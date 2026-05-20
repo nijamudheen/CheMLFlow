@@ -1,0 +1,85 @@
+{
+  "model_type": "dl_adaptive_nvar",
+  "rmse": 0.042700191773474214,
+  "primary_horizon": 100,
+  "primary_metric": "rmse_h100",
+  "split_metrics_path": "/mnt/ufs18/rs-049/Workflow_ML_Chemistry/CheMLFlow-main/output/runs/2ab828f7/case_0006/test_run_23/dl_adaptive_nvar_split_metrics.json",
+  "train_rmse_horizons": {
+    "rmse_h25": 0.02453677970916033,
+    "rmse_h50": 0.029138159565627576,
+    "rmse_h75": 0.03419823572039604,
+    "rmse_h100": 0.04012215118855238
+  },
+  "val_rmse_horizons": {
+    "rmse_h25": 0.021666372567415236,
+    "rmse_h50": 0.02250167038291693,
+    "rmse_h75": 0.02675565183162689,
+    "rmse_h100": 0.031036308873444794
+  },
+  "test_rmse_horizons": {
+    "rmse_h25": 0.024978022463619708,
+    "rmse_h50": 0.029241898469626902,
+    "rmse_h75": 0.03637903220951557,
+    "rmse_h100": 0.042700191773474214
+  },
+  "training": {
+    "adam_epochs_run": 5000,
+    "adam_best_loss": 0.0032354160211980343,
+    "lbfgs_epochs_run": 376,
+    "lbfgs_best_loss": 0.0020745627116411924
+  },
+  "config": {
+    "k": 50,
+    "hidden_dim": 500,
+    "feature_dim_m": null,
+    "n_connectome": 100,
+    "input_scaling": 0.1,
+    "lr_adam": 0.0001,
+    "max_epochs_adam": 5000,
+    "adam_patience": 200,
+    "weight_decay": 0.0,
+    "lr_lbfgs": 0.1,
+    "num_epochs_lbfgs": 50000,
+    "lbfgs_patience": 200,
+    "lbfgs_max_iter": 50,
+    "lbfgs_history_size": 50,
+    "tolerance": 1e-20,
+    "train_noise_scale": 0.05,
+    "dataset_noise_scale": 0.2,
+    "horizons": [
+      25,
+      50,
+      75,
+      100
+    ],
+    "num_windows": 10,
+    "optuna_num_runs": 5,
+    "test_num_runs": 1,
+    "device": "auto",
+    "base_seed": 2048,
+    "connectome_xlsx": null,
+    "connectome_sheet": null,
+    "connectome_mode": "connectome",
+    "connectome_selection_mode": "top_degree",
+    "connectome_selection_seed": 2025,
+    "connectome_binarize": false,
+    "connectome_normalization": "maxabs",
+    "connectome_swap_factor": 10,
+    "raw_meta": {
+      "data_source": "local_npy",
+      "path": "data/ground_truth.npy",
+      "shape": [
+        15001,
+        1
+      ],
+      "time_axis": "cols"
+    }
+  },
+  "split": {
+    "warmup_len": 500,
+    "train_len": 7500,
+    "val_len": 1000,
+    "test_len": 1000
+  },
+  "data_dim": 1
+}

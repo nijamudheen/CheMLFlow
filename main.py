@@ -25,6 +25,8 @@ from contracts import (
     ANALYZE_STATS_OUTPUT_CONTRACT,
     CURATE_INPUT_CONTRACT,
     CURATE_OUTPUT_CONTRACT,
+    FEATURIZE_LIPINSKI_INPUT_CONTRACT,
+    FEATURIZE_LIPINSKI_OUTPUT_CONTRACT,
     FEATURIZE_RDKIT_INPUT_CONTRACT,
     FEATURIZE_RDKIT_OUTPUT_CONTRACT,
     FEATURIZE_RDKIT_LABELED_INPUT_CONTRACT,
@@ -46,6 +48,7 @@ from contracts import (
     LABEL_IC50_INPUT_CONTRACT,
     LABEL_IC50_OUTPUT_2CLASS_CONTRACT,
     LABEL_IC50_OUTPUT_3CLASS_CONTRACT,
+    LIPINSKI_CONTRACT,
     MODEL_LABELS_CONTRACT,
     PIC50_2CLASS_CONTRACT,
     PIC50_3CLASS_CONTRACT,
@@ -80,6 +83,7 @@ def build_paths(base_dir: str) -> dict[str, str]:
         "curated": os.path.join(base_dir, "curated.csv"),
         "curated_labeled": os.path.join(base_dir, "curated_labeled.csv"),
         "curated_smiles": os.path.join(base_dir, "curated_smiles.csv"),
+        "lipinski": os.path.join(base_dir, "lipinski_results.csv"),
         "pic50_3class": os.path.join(base_dir, "bioactivity_3class_pIC50.csv"),
         "pic50_2class": os.path.join(base_dir, "bioactivity_2class_pIC50.csv"),
         "rdkit_descriptors": os.path.join(base_dir, "rdkit_descriptors.csv"),
@@ -538,6 +542,25 @@ def run_node_featurize_none(context: dict) -> None:
     context["feature_matrix"] = curated_path
     context["labels_matrix"] = curated_path
     context["feature_method"] = "none"
+
+
+def run_node_featurize_lipinski(context: dict) -> None:
+    validate_contract(
+        bind_output_path(
+            FEATURIZE_LIPINSKI_INPUT_CONTRACT,
+            context.get("curated_path", context["paths"]["curated"]),
+        ),
+        warn_only=False,
+    )
+    script_path = os.path.join("utilities", "Lipinski_rules.py")
+    smiles_file = context.get("curated_path", context["paths"]["curated"])
+    output_file = context["paths"]["lipinski"]
+    _run_subprocess([sys.executable, script_path, smiles_file, output_file])
+    validate_contract(
+        bind_output_path(FEATURIZE_LIPINSKI_OUTPUT_CONTRACT, output_file),
+        warn_only=True,
+    )
+    context["curated_path"] = output_file
 
 
 def run_node_label_ic50(context: dict) -> None:
@@ -2567,12 +2590,80 @@ def run_node_explain(context: dict) -> None:
     )
 
 
+def run_node_train_timeseries(context: dict) -> None:
+    """Train an Adaptive NVAR / Connectome NVAR forecaster.
+
+    This node is wired for `pipeline_type=timeseries`. It reads the canonical
+    raw .npz produced by `get_data` (sources `local_npy` or `local_ts_csv`),
+    runs Adam->L-BFGS training on the residual targets, performs windowed
+    autoregressive rollout, and writes CheMLFlow-compatible metrics + a rich
+    per-window-per-horizon CSV. No tabular preprocessing/curation/featurization
+    is invoked — those nodes are not meaningful for a single time series.
+    """
+    output_dir = context["run_dir"]
+    model_type = str(context["model_type"]).strip().lower()
+    paths = context["paths"]
+    train_config = context.get("train_config", {}) or {}
+    model_config = dict(context.get("model_config", {}) or {})
+    model_params = (
+        model_config.get("params", {})
+        if isinstance(model_config.get("params"), dict)
+        else {}
+    )
+    split_block = context.get("split_config", {}) or {}
+    if not split_block:
+        raise ValueError(
+            "train.timeseries requires a top-level `split:` block with "
+            "warmup_len/train_len/val_len/test_len. See "
+            "config/timeseries_mg_demo.yaml for an example."
+        )
+    if model_type not in {"dl_adaptive_nvar", "dl_connectome_nvar"}:
+        raise ValueError(
+            f"train.timeseries supports model.type in "
+            f"['dl_adaptive_nvar', 'dl_connectome_nvar']; got {model_type!r}."
+        )
+
+    raw_path = paths["raw"]
+    if not os.path.exists(raw_path):
+        raise FileNotFoundError(
+            f"Time-series raw file not found at {raw_path}; "
+            "did `get_data` run with data_source=local_npy or local_ts_csv?"
+        )
+
+    train_random_state = _resolve_seed(
+        context.get("global_random_state", 42),
+        train_config.get("random_state") if isinstance(train_config, dict) else None,
+    )
+
+    # Lazy import keeps the heavy torch/connectome path out of the import graph
+    # until a timeseries pipeline actually executes.
+    from MLModels.training import timeseries_nvar
+
+    train_result = timeseries_nvar.train_timeseries_nvar(
+        model_type=model_type,
+        raw_path=raw_path,
+        output_dir=output_dir,
+        model_params=model_params,
+        train_block=train_config,
+        split_block=split_block,
+        global_random_state=int(train_random_state),
+    )
+    context["trained_model_path"] = train_result.model_path
+    _track_heavy_artifact(context, train_result.model_path)
+
+    validate_contract(
+        bind_output_path(TRAIN_OUTPUT_CONTRACT, output_dir),
+        warn_only=True,
+    )
+
+
 NODE_REGISTRY = {
     "get_data": run_node_get_data,
     "curate": run_node_curate,
     "featurize.none": run_node_featurize_none,
     "label.normalize": run_node_label_normalize,
     "split": run_node_split,
+    "featurize.lipinski": run_node_featurize_lipinski,
     "label.ic50": run_node_label_ic50,
     "analyze.stats": run_node_analyze_stats,
     "analyze.eda": run_node_analyze_eda,
@@ -2583,6 +2674,7 @@ NODE_REGISTRY = {
     "select.features": run_node_select_features,
     "train": run_node_train,
     "train.tdc": run_node_train_tdc,
+    "train.timeseries": run_node_train_timeseries,
     "explain": run_node_explain,
 }
 
@@ -2598,6 +2690,7 @@ _SPLIT_MUST_FOLLOW = {
     "label.normalize",
     "label.ic50",
     "featurize.none",
+    "featurize.lipinski",
     "featurize.rdkit",
     "featurize.rdkit_labeled",
     "featurize.morgan",
@@ -2623,6 +2716,39 @@ def validate_pipeline_nodes(nodes: list[str]) -> None:
             raise ValueError("Use either 'train' or 'train.tdc' in a pipeline, not both.")
         if train_tdc_pos != len(nodes) - 1:
             raise ValueError("'train.tdc' must be the terminal node in pipeline.nodes.")
+
+    train_ts_positions = [i for i, node in enumerate(nodes) if node == "train.timeseries"]
+    if len(train_ts_positions) > 1:
+        raise ValueError("Pipeline must include at most one 'train.timeseries' node.")
+    if train_ts_positions:
+        train_ts_pos = train_ts_positions[0]
+        if "train" in nodes or "train.tdc" in nodes:
+            raise ValueError(
+                "Use only one of 'train', 'train.tdc', or 'train.timeseries' in a pipeline."
+            )
+        if train_ts_pos != len(nodes) - 1:
+            raise ValueError("'train.timeseries' must be the terminal node in pipeline.nodes.")
+        # Time-series pipelines bypass tabular splits/featurization entirely.
+        forbidden = {
+            "curate",
+            "split",
+            "preprocess.features",
+            "select.features",
+            "featurize.morgan",
+            "featurize.rdkit",
+            "featurize.rdkit_labeled",
+            "featurize.lipinski",
+            "featurize.none",
+            "label.normalize",
+            "label.ic50",
+            "explain",
+        }
+        bad = sorted(set(nodes) & forbidden)
+        if bad:
+            raise ValueError(
+                "train.timeseries is incompatible with tabular nodes "
+                f"{bad!r}; use only [get_data, train.timeseries] in pipeline.nodes."
+            )
 
     if uses_split_dependents and not split_positions:
         raise ValueError(
@@ -2692,6 +2818,8 @@ def run_configured_pipeline_nodes(config: dict, config_path: str) -> bool:
         model_type = model_config.get("type")
     elif "train.tdc" in nodes:
         model_type = train_tdc_model_config.get("type")
+    elif "train.timeseries" in nodes:
+        model_type = model_config.get("type")
 
     context = {
         "config_path": config_path,

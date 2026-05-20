@@ -1,0 +1,102 @@
+{
+  "model_type": "dl_adaptive_nvar",
+  "rmse": 0.0134676078800112,
+  "primary_horizon": 100,
+  "primary_metric": "rmse_h100",
+  "split_metrics_path": "/mnt/ufs18/rs-049/Workflow_ML_Chemistry/CheMLFlow-main/output/runs/2ab828f7/case_0004/dl_adaptive_nvar_split_metrics.json",
+  "train_rmse_horizons": {
+    "rmse_h25": 0.008179885847494007,
+    "rmse_h50": 0.009563992451876401,
+    "rmse_h75": 0.011316376877948642,
+    "rmse_h100": 0.013522508647292852
+  },
+  "val_rmse_horizons": {
+    "rmse_h25": 0.009556379495188594,
+    "rmse_h50": 0.011562304850667716,
+    "rmse_h75": 0.014097527088597416,
+    "rmse_h100": 0.016697781952098013
+  },
+  "test_rmse_horizons": {
+    "rmse_h25": 0.008763904403895139,
+    "rmse_h50": 0.01033490509726107,
+    "rmse_h75": 0.011759763024747372,
+    "rmse_h100": 0.0134676078800112
+  },
+  "training": {
+    "adam_epochs_run": 2834,
+    "adam_best_loss": 0.00117985880933702,
+    "lbfgs_epochs_run": 359,
+    "lbfgs_best_loss": 0.0006924665067344904
+  },
+  "config": {
+    "k": 50,
+    "hidden_dim": 20,
+    "feature_dim_m": null,
+    "n_connectome": 100,
+    "input_scaling": 0.1,
+    "lr_adam": 0.0048688065594331255,
+    "max_epochs_adam": 5000,
+    "adam_patience": 200,
+    "weight_decay": 0.0,
+    "lr_lbfgs": 0.1,
+    "num_epochs_lbfgs": 50000,
+    "lbfgs_patience": 200,
+    "lbfgs_max_iter": 50,
+    "lbfgs_history_size": 50,
+    "tolerance": 1e-20,
+    "train_noise_scale": 0.05,
+    "dataset_noise_scale": 0.1,
+    "horizons": [
+      25,
+      50,
+      75,
+      100
+    ],
+    "num_windows": 10,
+    "base_seed": 2025,
+    "connectome_xlsx": null,
+    "connectome_sheet": null,
+    "connectome_mode": "connectome",
+    "connectome_selection_mode": "top_degree",
+    "connectome_selection_seed": 2025,
+    "connectome_binarize": false,
+    "connectome_normalization": "maxabs",
+    "connectome_swap_factor": 10,
+    "raw_meta": {
+      "data_source": "local_npy",
+      "path": "data/ground_truth.npy",
+      "shape": [
+        15001,
+        1
+      ],
+      "time_axis": "cols"
+    }
+  },
+  "split": {
+    "warmup_len": 500,
+    "train_len": 7500,
+    "val_len": 1000,
+    "test_len": 1000
+  },
+  "data_dim": 1,
+  "tuning": {
+    "method": "optuna",
+    "n_trials_requested": 30,
+    "n_trials_completed": 30,
+    "best_trial_number": 22,
+    "best_value": 0.015305375726893545,
+    "best_params": {
+      "k": 50,
+      "hidden_dim": 20,
+      "lr_adam": 0.0048688065594331255,
+      "lr_lbfgs": 0.1
+    },
+    "search_axes": [
+      "hidden_dim",
+      "k",
+      "lr_adam",
+      "lr_lbfgs"
+    ],
+    "trial_epoch_cap": 500
+  }
+}

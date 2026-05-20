@@ -79,17 +79,6 @@ f1,f2,target,pred_0
 Given that this is a tiny demonstration dataset, the result is only meant to verify the workflow and
 artifact layout. Use a larger train/test split or a DOE configuration for real model comparison.
 
-For generated DOE studies on a local machine, run the generated execution
-children and analyze them with:
-
-```bash
-python scripts/run_doe_local.py --doe-dir config/generated/<study> --max-workers 1 --resume
-python analysis.py --backend local --doe-dir config/generated/<study> --output-dir config/generated/<study>/analysis_local
-```
-
-The DOE runner records execution attempts in `execution_manifest.jsonl`; local
-analysis combines those attempts with per-case `run_status.json` and metrics.
-
 In the rest of the documentation, we'll go into more detail about how to:
 
 - Configure node-based pipelines

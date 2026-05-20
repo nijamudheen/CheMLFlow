@@ -44,9 +44,7 @@ coverage.xml
 /local_data/
 /config/
 /config/generated/
-/scripts/*
-!/scripts/generate_doe.py
-!/scripts/run_doe_local.py
+/scripts/
 *.zip
 
 # CatBoost

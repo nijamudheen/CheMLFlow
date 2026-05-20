@@ -1,0 +1,17 @@
+2026-05-15 08:55:02,066 - WARNING - [get_data_output] Failed to read CSV /mnt/ufs18/rs-049/Workflow_ML_Chemistry/CheMLFlow-main/output/data/457a96c2/case_0001/raw.csv: 'utf-8' codec can't decode byte 0x99 in position 14: invalid start byte. Hint: Raw dataset exported by get_data.
+[I 2026-05-15 08:55:02,412] A new study created in memory with name: no-name-971c1de3-66d1-4016-a257-9f3efe0771b9
+2026-05-15 08:55:02,413 - INFO - Starting Optuna search for dl_adaptive_nvar: n_trials=30, search axes=['hidden_dim', 'k', 'lr_adam', 'lr_lbfgs']
+2026-05-15 08:55:04,653 - INFO - ============================================================
+2026-05-15 08:55:04,654 - INFO - Device diagnostic (emitted once per process):
+2026-05-15 08:55:04,654 - INFO -   torch.__version__         = 2.5.1+cu121
+2026-05-15 08:55:04,655 - INFO -   torch.version.cuda        = 12.1
+2026-05-15 08:55:04,655 - INFO -   torch.cuda.is_available() = True
+2026-05-15 08:55:04,655 - INFO -   torch.cuda.device_count() = 4
+2026-05-15 08:55:04,655 - INFO -   CUDA_VISIBLE_DEVICES env  = <unset>
+2026-05-15 08:55:04,656 - INFO -   requested device          = cuda
+2026-05-15 08:55:04,656 - INFO -   resolved device           = cuda
+2026-05-15 08:55:04,656 - INFO - ============================================================
+/mnt/ufs18/rs-049/Workflow_ML_Chemistry/CheMLFlow-main/MLModels/training/timeseries_nvar.py:426: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  model.load_state_dict(torch.load(save_path, map_location=device))
+/mnt/ufs18/rs-049/Workflow_ML_Chemistry/CheMLFlow-main/MLModels/training/timeseries_nvar.py:464: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  model.load_state_dict(torch.load(save_path, map_location=device))

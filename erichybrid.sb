@@ -1,0 +1,274 @@
+#!/bin/bash
+#SBATCH --job-name=pah_doe
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=1
+#SBATCH --mem=2G
+#SBATCH --time=00:20:00
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=susanalopezmoreno@gmail.com
+#SBATCH --output=%x-%j.out
+#SBATCH --error=%x-%j.err
+
+set -euo pipefail
+
+# ------------------------------------------------------------------
+# Environment Activation (Fixed using your working cluster commands)
+# ------------------------------------------------------------------
+unset PYTHONPATH
+module purge >/dev/null 2>&1 || true
+module load Conda
+
+ENV_NAME="${ENV_NAME:-chemlflow_env_py312}"
+CONDA_BASE="$(conda info --base)"
+
+if [[ -f "$CONDA_BASE/etc/profile.d/conda.sh" ]]; then
+    source "$CONDA_BASE/etc/profile.d/conda.sh"
+else
+    echo "Conda profile script not found at $CONDA_BASE/etc/profile.d/conda.sh" >&2
+    exit 2
+fi
+
+conda activate "$ENV_NAME"
+PYTHON_BIN="$(command -v python)"
+
+if [[ -z "$PYTHON_BIN" ]]; then
+    echo "No python executable found after conda activate $ENV_NAME" >&2
+    exit 2
+fi
+
+# ------------------------------------------------------------------
+# Fixed project paths & Dataset (Strictly using your paths from Script 2)
+# ------------------------------------------------------------------
+DATASET="${DATASET:-pah}"
+USER_DIR="/mnt/scratch/f0101291/ChemFlow"
+DOE_PROJECT_DIR="/mnt/research/Workflow_ML_Chemistry/CheMLFlow_eric"
+RUN_PROJECT_DIR="$DOE_PROJECT_DIR"
+
+# Batch namespace
+RUN_TAG="${SLURM_JOB_NAME}_${SLURM_JOB_ID}"
+
+# Organized layout mapping
+RUNTIME_DIR="$USER_DIR/runtime"
+DOE_ROOT="$USER_DIR/doe"
+LOG_ROOT="$USER_DIR/logs/$RUN_TAG"
+OUTPUT_ROOT="${OUTPUT_ROOT:-$USER_DIR/output}"
+
+DOE_SRC="$DOE_PROJECT_DIR/config/doe_${DATASET}.yaml"
+DOE_RUN="$RUNTIME_DIR/doe_${DATASET}_${RUN_TAG}.runtime.yaml"
+DOE_OUT="${DOE_OUT_DIR:-$DOE_ROOT/$RUN_TAG}"
+SUBMIT_CHILD_JOBS="${SUBMIT_CHILD_JOBS:-1}"
+
+# Shared roots for this run batch
+RUNS_ROOT="$OUTPUT_ROOT/runs/$RUN_TAG"
+DATA_ROOT="$OUTPUT_ROOT/data"
+
+# Ensure all workspace directories exist
+mkdir -p \
+  "$RUNTIME_DIR" \
+  "$DOE_ROOT" \
+  "$LOG_ROOT" \
+  "$DOE_OUT" \
+  "$DATA_ROOT" \
+  "$RUNS_ROOT"
+
+# Intercept and copy parent execution prints into your log layout
+exec > >(tee -a "$LOG_ROOT/${SLURM_JOB_NAME}-${SLURM_JOB_ID}.out") \
+     2> >(tee -a "$LOG_ROOT/${SLURM_JOB_NAME}-${SLURM_JOB_ID}.err" >&2)
+
+# ------------------------------------------------------------------
+# Advanced Hardware Customizations (Kept from Script 1)
+# ------------------------------------------------------------------
+GPU_TYPE="${GPU_TYPE:-a100}"
+GPU_COUNT="${GPU_COUNT:-1}"
+
+# ------------------------------------------------------------------
+# Path Sanity Checks
+# ------------------------------------------------------------------
+if [[ ! -f "$DOE_SRC" ]]; then
+    echo "DOE source not found: $DOE_SRC" >&2
+    exit 2
+fi
+if [[ ! -f "$RUN_PROJECT_DIR/scripts/generate_doe.py" ]]; then
+    echo "DOE generator not found: $RUN_PROJECT_DIR/scripts/generate_doe.py" >&2
+    exit 2
+fi
+if [[ ! -f "$RUN_PROJECT_DIR/main.py" ]]; then
+    echo "Run project main.py not found: $RUN_PROJECT_DIR/main.py" >&2
+    exit 2
+fi
+
+echo "=== PYTHON CHECK (DOE master) ==="
+srun "$PYTHON_BIN" -c "import sys, yaml, sklearn; print(sys.executable); print('yaml OK'); print('sklearn', sklearn.__version__)"
+
+# ------------------------------------------------------------------
+# Write runtime DOE with user-local paths
+# ------------------------------------------------------------------
+"$PYTHON_BIN" - "$DOE_SRC" "$DOE_RUN" "$DOE_OUT" "$DATA_ROOT" "$RUNS_ROOT" <<'PY'
+import sys
+from pathlib import Path
+import yaml
+
+src, dst, doe_out, data_root, runs_root = sys.argv[1:6]
+
+spec = yaml.safe_load(Path(src).read_text(encoding="utf-8"))
+spec.setdefault("output", {})["dir"] = doe_out
+spec.setdefault("defaults", {})["global.base_dir"] = data_root
+spec.setdefault("defaults", {})["global.run_dir"] = runs_root
+
+Path(dst).write_text(yaml.safe_dump(spec, sort_keys=False), encoding="utf-8")
+print(f"Wrote runtime DOE: {dst}")
+PY
+
+# ------------------------------------------------------------------
+# Generate DOE case configs
+# ------------------------------------------------------------------
+cd "$RUN_PROJECT_DIR"
+"$PYTHON_BIN" scripts/generate_doe.py --doe "$DOE_RUN"
+
+MANIFEST="$DOE_OUT/manifest.jsonl"
+if [[ ! -f "$MANIFEST" ]]; then
+    echo "Manifest not found: $MANIFEST" >&2
+    exit 2
+fi
+
+mapfile -t VALID_CASES < <(
+    "$PYTHON_BIN" - "$MANIFEST" <<'PY'
+import json, sys
+from pathlib import Path
+
+for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+    if not line.strip():
+        continue
+    rec = json.loads(line)
+    if str(rec.get("status", "")).lower() != "valid":
+        continue
+    cfg = rec.get("config_path")
+    if not cfg:
+        continue
+    factors = rec.get("factors") or {}
+    model = factors.get("train.model.type", "")
+    print(f"{cfg}\t{model}")
+PY
+)
+
+echo "Valid DOE cases: ${#VALID_CASES[@]}"
+if [[ "$SUBMIT_CHILD_JOBS" == "0" ]]; then
+    echo "DOE-only mode: skipping child job submission."
+    exit 0
+fi
+
+# Deep Learning model registry (Includes advanced NVAR architectures from Script 1)
+DL_MODELS=(dl_simple dl_deep dl_gru dl_resmlp dl_tabtransformer dl_aereg dl_adaptive_nvar dl_connectome_nvar)
+
+# ------------------------------------------------------------------
+# Per-case folder isolation rewrite + Child Submission
+# ------------------------------------------------------------------
+for line in "${VALID_CASES[@]}"; do
+    cfg="${line%%$'\t'*}"
+    model="${line#*$'\t'}"
+    case_name="$(basename "$cfg" .yaml)"
+
+    CASE_LOG_DIR="$LOG_ROOT/$case_name"
+    CASE_RUN_DIR="$RUNS_ROOT/$case_name"
+
+    mkdir -p "$CASE_LOG_DIR" "$CASE_RUN_DIR"
+
+    # Isolate case directories inside the YAML
+    "$PYTHON_BIN" - "$cfg" "$CASE_RUN_DIR" "$DATA_ROOT" <<'PY'
+import sys
+from pathlib import Path
+import yaml
+
+cfg_path, run_dir, data_root = sys.argv[1:4]
+p = Path(cfg_path)
+spec = yaml.safe_load(p.read_text(encoding="utf-8"))
+
+spec.setdefault("global", {})["run_dir"] = run_dir
+spec.setdefault("global", {})["base_dir"] = data_root
+
+p.write_text(yaml.safe_dump(spec, sort_keys=False), encoding="utf-8")
+print(f"Updated {cfg_path} -> global.run_dir={run_dir}")
+PY
+
+    # Explicit, typed GPU request configuration (Script 1 safety feature)
+    gpu_args=()
+    if [[ " ${DL_MODELS[*]} " == *" ${model} "* ]]; then
+        gpu_args+=(--gpus="${GPU_TYPE}:${GPU_COUNT}")
+    fi
+
+    echo "Submitting $case_name model=$model gpu_requested=$([[ ${#gpu_args[@]} -gt 0 ]] && echo yes || echo no)"
+
+    sbatch \
+        --job-name="${DATASET}_${case_name}" \
+        --ntasks=1 \
+        --cpus-per-task=4 \
+        --mem=24G \
+        --time=08:00:00 \
+        "${gpu_args[@]}" \
+        --output="$CASE_LOG_DIR/slurm-%j.out" \
+        --error="$CASE_LOG_DIR/slurm-%j.err" \
+        --export=ALL,\
+CHEMLFLOW_CONFIG="$cfg",\
+RUN_PROJECT_DIR="$RUN_PROJECT_DIR",\
+CONDA_BASE="$CONDA_BASE",\
+ENV_NAME="$ENV_NAME",\
+CASE_LOG_DIR="$CASE_LOG_DIR",\
+CASE_RUN_DIR="$CASE_RUN_DIR",\
+CASE_NAME="$case_name",\
+MODEL_TYPE="$model",\
+RUN_TAG="$RUN_TAG" <<'EOF'
+#!/bin/bash
+set -euo pipefail
+
+# Reset environment parameters on the compute node cleanly
+unset PYTHONPATH
+module purge >/dev/null 2>&1 || true
+module load Conda
+source "$CONDA_BASE/etc/profile.d/conda.sh"
+conda activate "$ENV_NAME"
+cd "$RUN_PROJECT_DIR"
+
+echo "==== CHILD CONTEXT ===="
+echo "CASE_NAME=${CASE_NAME-}"
+echo "MODEL_TYPE=${MODEL_TYPE-}"
+echo "CASE_LOG_DIR=${CASE_LOG_DIR-}"
+echo "CASE_RUN_DIR=${CASE_RUN_DIR-}"
+echo "CHEMLFLOW_CONFIG=${CHEMLFLOW_CONFIG-}"
+echo "RUN_TAG=${RUN_TAG-}"
+echo "======================="
+
+echo "==== SLURM GPU CHECK ===="
+echo "JOBID=$SLURM_JOB_ID HOST=$(hostname)"
+echo "SLURM_JOB_GPUS=${SLURM_JOB_GPUS-<unset>}"
+echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES-<unset>}"
+echo "========================="
+
+if command -v nvidia-smi >/dev/null 2>&1; then
+    nvidia-smi -L || echo "nvidia-smi utility returned non-zero status"
+else
+    echo "nvidia-smi utility not visible on this compute partition path"
+fi
+
+# Pre-execution runtime safety trap to verify PyTorch/CUDA integrity
+python - - <<'PYCHK'
+import os, sys
+try:
+    import torch
+except Exception as e:
+    print(f"torch import failure: {e}", file=sys.stderr)
+    sys.exit(0)
+print(f"  torch.__version__         = {torch.__version__}")
+print(f"  torch.cuda.is_available() = {torch.cuda.is_available()}")
+print(f"  torch.cuda.device_count() = {torch.cuda.device_count()}")
+PYCHK
+
+echo "=== RUN (child) ==="
+srun python -u main.py
+EOF
+done
+
+echo "Submitted ${#VALID_CASES[@]} child jobs."
+echo "Run outputs will be under: $RUNS_ROOT"
+echo "Logs will be under: $LOG_ROOT"
+
+

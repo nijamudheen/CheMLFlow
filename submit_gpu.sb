@@ -1,0 +1,282 @@
+#!/bin/bash --login
+#SBATCH --job-name=A-NVAR_doe
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=1
+#SBATCH --mem=2G
+#SBATCH --time=00:20:00
+#SBATCH -A mendoza_q
+#SBATCH --exclude=amr-163,amr-178,amr-179
+#SBATCH --mail-type=ALL
+#SBATCH --mail-user=susanalopezmoreno@gmail.com
+#SBATCH --output=%x-%j.out
+#SBATCH --error=%x-%j.err
+
+set -euo pipefail
+
+# Prevent accidental imports from ~/.local
+# export PYTHONNOUSERSITE=1
+unset PYTHONPATH
+module purge >/dev/null 2>&1 || true
+
+# Your repo (where main.py and scripts/ live)
+RUN_PROJECT_DIR="/mnt/ufs18/rs-049/Workflow_ML_Chemistry/CheMLFlow-main"
+
+# Your python (explicit, like your working single-run sb)
+PY="/mnt/home/k0115547/miniconda3/envs/chemlflow_env_py312/bin/python"
+
+# Where to write logs, runtime DOE yaml, DOE outputs, and run outputs
+LOG_DIR="$RUN_PROJECT_DIR/logs"
+
+# DOE spec source (in the repo)
+DOE_SRC="$RUN_PROJECT_DIR/config/doe_timeseries.yaml"
+
+# Runtime copy we generate (user-local)
+DOE_RUN="$RUN_PROJECT_DIR/doe_timeseries.runtime.yaml"
+
+# DOE output folder (manifest.jsonl will be written here)
+DOE_OUT="${DOE_OUT_DIR:-$RUN_PROJECT_DIR/A-NVAR_doe}"
+
+# Root for global output paths injected into the runtime DOE yaml
+OUTPUT_ROOT="${OUTPUT_ROOT:-$RUN_PROJECT_DIR/output}"
+
+# Submit the child jobs? 1=yes, 0=no
+SUBMIT_CHILD_JOBS="${SUBMIT_CHILD_JOBS:-1}"
+
+# -----------------------------------------------------------------------------
+# GPU type for child jobs.
+#
+# Per ICER docs (https://docs.icer.msu.edu/Requesting_GPUs/) the cluster
+# *strongly recommends* specifying a GPU type because software is often
+# compiled for a specific architecture, and the previous untyped --gpus=1
+# request let Slurm place the job on a node where no GPU was actually
+# attached to the task (this is the failure mode that produced
+# CUDA_VISIBLE_DEVICES env = <empty> in earlier logs).
+#
+# Available types on ICER (as of the docs): v100, v100s, a100, h200,
+# gh200 (Grace Hopper, ARM — NOT compatible with x86 PyTorch builds).
+# Your conda env ships PyTorch 2.5.1+cu121, which is fine for v100, v100s,
+# a100, and h200; do NOT target gh200 from this env.
+#
+# Override at submission time:
+#     GPU_TYPE=a100 sbatch submit_gpu.sb
+# -----------------------------------------------------------------------------
+GPU_TYPE="${GPU_TYPE:-a100}"
+GPU_COUNT="${GPU_COUNT:-1}"
+
+###############################################################################
+# Sanity checks + dirs
+###############################################################################
+mkdir -p "$LOG_DIR" "$DOE_OUT" "$OUTPUT_ROOT"
+
+if [[ ! -x "$PY" ]]; then
+  echo "Python not found/executable: $PY" >&2
+  exit 2
+fi
+if [[ ! -f "$DOE_SRC" ]]; then
+  echo "DOE source not found: $DOE_SRC" >&2
+  exit 2
+fi
+if [[ ! -f "$RUN_PROJECT_DIR/scripts/generate_doe.py" ]]; then
+  echo "DOE generator not found: $RUN_PROJECT_DIR/scripts/generate_doe.py" >&2
+  exit 2
+fi
+if [[ ! -f "$RUN_PROJECT_DIR/main.py" ]]; then
+  echo "Run project main.py not found: $RUN_PROJECT_DIR/main.py" >&2
+  exit 2
+fi
+
+echo "=== PYTHON CHECK (DOE master) ==="
+srun "$PY" -c "import sys, yaml, sklearn; print(sys.executable); print('yaml OK'); print('sklearn', sklearn.__version__)"
+
+###############################################################################
+# Write runtime DOE YAML (user-local paths)
+###############################################################################
+"$PY" - "$DOE_SRC" "$DOE_RUN" "$DOE_OUT" "$OUTPUT_ROOT" "$RUN_PROJECT_DIR" <<'PY'
+import sys
+from pathlib import Path
+import yaml
+
+src, dst, doe_out, output_root, project_dir = sys.argv[1:6]
+src_path = Path(src).resolve()
+project_dir = Path(project_dir).resolve()
+
+spec = yaml.safe_load(Path(src).read_text(encoding="utf-8"))
+
+spec.setdefault("output", {})["dir"] = str(Path(doe_out).resolve())
+spec.setdefault("defaults", {})["global.base_dir"] = f"{Path(output_root).resolve()}/data"
+spec.setdefault("defaults", {})["global.run_dir"]  = f"{Path(output_root).resolve()}/runs"
+
+# Make dataset source path absolute
+dataset = spec.setdefault("dataset", {})
+source = dataset.setdefault("source", {})
+if source.get("type") in {"local_csv", "local_npy", "local_npz"} and "path" in source:
+    p = Path(source["path"])
+    if not p.is_absolute():
+        # Resolve relative to the DOE source file location or project root
+        candidate = (src_path.parent / p).resolve()
+        if not candidate.exists():
+            candidate = (project_dir / p).resolve()
+        source["path"] = str(candidate)
+
+Path(dst).write_text(yaml.safe_dump(spec, sort_keys=False), encoding="utf-8")
+print(f"Wrote runtime DOE: {dst}")
+print(f"Resolved dataset path: {source.get('path')}")
+print("Source DOE train.tuning.n_trials:", spec.get("defaults", {}).get("train.tuning.n_trials"))
+PY
+
+echo "=== DOE RUNTIME CHECK ==="
+"$PY" - "$DOE_RUN" <<'PY'
+import sys, yaml
+from pathlib import Path
+spec = yaml.safe_load(Path(sys.argv[1]).read_text(encoding="utf-8")) or {}
+print("Runtime DOE train.tuning.n_trials:", (spec.get("defaults") or {}).get("train.tuning.n_trials"))
+PY
+
+# Remove generated files from a previous DOE shape before regenerating.
+# The manifest is rewritten below, but clearing old case YAMLs prevents
+# accidental manual submission of stale configs that still contain old values
+# such as train.tuning.n_trials=30.
+rm -f "$DOE_OUT"/case_*.yaml "$DOE_OUT"/manifest.jsonl "$DOE_OUT"/parent_manifest.jsonl "$DOE_OUT"/summary.json
+
+###############################################################################
+# Generate DOE cases (writes manifest.jsonl into DOE_OUT)
+###############################################################################
+cd "$RUN_PROJECT_DIR"
+"$PY" scripts/generate_doe.py --doe "$DOE_RUN"
+
+MANIFEST="$DOE_OUT/manifest.jsonl"
+if [[ ! -f "$MANIFEST" ]]; then
+  echo "Manifest not found: $MANIFEST" >&2
+  exit 2
+fi
+
+mapfile -t VALID_CONFIGS < <(
+  "$PY" - "$MANIFEST" <<'PY'
+import json, sys
+from pathlib import Path
+
+for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+    if not line.strip():
+        continue
+    rec = json.loads(line)
+    if str(rec.get("status", "")).lower() != "valid":
+        continue
+    cfg = rec.get("config_path")
+    if not cfg:
+        continue
+    factors = rec.get("factors") or {}
+    model = factors.get("train.model.type", "")
+    # Emit "config_path<TAB>model" so the submit loop can request GPUs for DL models.
+    print(f"{cfg}\t{model}")
+PY
+)
+
+echo "Valid DOE cases: ${#VALID_CONFIGS[@]}"
+
+echo "=== GENERATED CASE CHECK ==="
+"$PY" - "$MANIFEST" <<'PY'
+import json, sys, yaml
+from pathlib import Path
+for line in Path(sys.argv[1]).read_text(encoding="utf-8").splitlines():
+    if not line.strip():
+        continue
+    rec = json.loads(line)
+    if str(rec.get("status", "")).lower() != "valid":
+        continue
+    cfg_path = rec.get("config_path")
+    if not cfg_path:
+        continue
+    cfg = yaml.safe_load(Path(cfg_path).read_text(encoding="utf-8")) or {}
+    n_trials = (((cfg.get("train") or {}).get("tuning") or {}).get("n_trials"))
+    print(f"{Path(cfg_path).name}: train.tuning.n_trials={n_trials}")
+PY
+
+if [[ "$SUBMIT_CHILD_JOBS" == "0" ]]; then
+  echo "DOE-only mode: skipping child job submission."
+  exit 0
+fi
+
+###############################################################################
+# Submit child jobs
+###############################################################################
+DL_MODELS=(dl_simple dl_deep dl_gru dl_resmlp dl_tabtransformer dl_aereg dl_adaptive_nvar dl_connectome_nvar)
+
+for line in "${VALID_CONFIGS[@]}"; do
+  cfg="${line%%$'\t'*}"
+  model="${line#*$'\t'}"
+  case_name="$(basename "$cfg" .yaml)"
+
+  # -----------------------------------------------------------------------
+  # GPU request, ICER-style.
+  #
+  # Was: --gpus=1
+  # Now: --gpus=<type>:<count>  (e.g. --gpus=a100:1)
+  #
+  # ICER's docs explicitly recommend specifying the GPU type
+  # (https://docs.icer.msu.edu/Requesting_GPUs/). The previous untyped
+  # request allowed Slurm to land the job on a node where no GPU was
+  # attached to the task — visible in the failing log as
+  # CUDA_VISIBLE_DEVICES env = <empty>. The typed request forces Slurm to
+  # bind a real device of the right architecture.
+  # -----------------------------------------------------------------------
+  gpu_args=()
+  if [[ " ${DL_MODELS[*]} " == *" ${model} "* ]]; then
+    gpu_args+=(--gpus="${GPU_TYPE}:${GPU_COUNT}")
+  fi
+
+  sbatch "${gpu_args[@]}" \
+    --job-name="adaptive_nvar_${case_name}" \
+    --ntasks=1 \
+    --cpus-per-task=4 \
+    --mem=24G \
+    --time=08:00:00 \
+    --output="$LOG_DIR/pgp_${case_name}-%j.out" \
+    --error="$LOG_DIR/pgp_${case_name}-%j.err" \
+    --export=ALL,CHEMLFLOW_CONFIG="$cfg",RUN_PROJECT_DIR="$RUN_PROJECT_DIR",PY="$PY" <<'EOF'
+#!/bin/bash --login
+set -euo pipefail
+export PYTHONNOUSERSITE=1
+unset PYTHONPATH
+module purge >/dev/null 2>&1 || true
+
+cd "$RUN_PROJECT_DIR"
+
+echo "=== PYTHON CHECK (child) ==="
+srun "$PY" -c "import sys; print(sys.executable)"
+
+# -----------------------------------------------------------------------------
+# GPU sanity check: print Slurm/PyTorch's view of the GPU BEFORE the long run.
+# If the device is not visible here, abort immediately rather than waiting
+# 35 minutes for Optuna to fail. This is a backstop in case the typed --gpus
+# request still doesn't attach a device (e.g. a node-level issue).
+# -----------------------------------------------------------------------------
+echo "=== GPU CHECK (child) ==="
+echo "SLURM_JOB_GPUS=${SLURM_JOB_GPUS:-<unset>}"
+echo "SLURM_GPUS_ON_NODE=${SLURM_GPUS_ON_NODE:-<unset>}"
+echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
+if command -v nvidia-smi >/dev/null 2>&1; then
+  nvidia-smi -L || echo "nvidia-smi -L failed"
+else
+  echo "nvidia-smi not on PATH"
+fi
+srun "$PY" - <<'PYCHK'
+import os, sys
+try:
+    import torch
+except Exception as e:
+    print(f"torch import failed: {e}", file=sys.stderr)
+    sys.exit(0)  # the main run will surface this through the trainer's diagnostic
+print(f"  torch.__version__         = {torch.__version__}")
+print(f"  torch.version.cuda        = {torch.version.cuda}")
+print(f"  torch.cuda.is_available() = {torch.cuda.is_available()}")
+print(f"  torch.cuda.device_count() = {torch.cuda.device_count()}")
+print(f"  CUDA_VISIBLE_DEVICES env  = {os.environ.get('CUDA_VISIBLE_DEVICES', '<unset>')}")
+PYCHK
+
+echo "=== RUN (child) ==="
+echo "CHEMLFLOW_CONFIG=$CHEMLFLOW_CONFIG"
+srun "$PY" -u main.py
+EOF
+done
+
+echo "Submitted ${#VALID_CONFIGS[@]} child jobs."

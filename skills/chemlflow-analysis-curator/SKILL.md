@@ -18,13 +18,10 @@ Use this skill to prove a CheMLFlow analysis result is complete, balanced, and i
 5. Check every aggregated CV row has complete slices, usually `slice_count=5`, `completed_slices=5`, `failed_slices=0`.
 6. Verify `scaler`, `feature_input`, `model_type`, and `split_strategy` distributions are balanced for the DOE design.
 7. Separate expected special cases from problems. For example, `chemprop` and `chemeleon` usually appear under `smiles_native`, not Morgan/RDKit.
-8. Report failures, missing statuses, incomplete folds, row-count mismatches, suspicious metric path gaps, and non-finite ranking metrics before discussing best models.
-9. Treat ranking as blocked unless the audit reports `final_claim_ready: true`.
-10. Identify the execution backend. Local DOE analysis should come from `analysis.py --backend local`, not fabricated Slurm logs or fake `sacct` rows.
+8. Report failures, missing statuses, incomplete folds, row-count mismatches, and suspicious metric path gaps before discussing best models.
 
 ## Standard Checks
 
-- `report.json` exists and contains required provenance fields.
 - `child_job_count_from_log` equals `valid_config_count_from_manifest`.
 - `mapping_mismatch` is false.
 - `state_counts` contains only `COMPLETED` unless the user explicitly asks to inspect a partial run.
@@ -35,11 +32,6 @@ Use this skill to prove a CheMLFlow analysis result is complete, balanced, and i
 - Morgan and RDKit row counts match for non-native models when both feature branches are in the DOE.
 - Split strategy counts match for random/scaffold comparisons.
 - `failed_case_configs.txt` and `failed_job_ids.txt` are empty for final complete runs.
-- Ranking metrics are finite in every complete aggregate row used for a final claim.
-
-The rule is audit first, rank second. If the audit script exits nonzero, do not summarize "best models" as final results.
-
-For local runs, `child_job_count_from_log` is retained as a compatibility count in `report.json`; confirm `backend: local`, `execution_manifest_path`, `execution_count`, `local_attempt_count`, and `valid_config_count_from_manifest` are consistent.
 
 ## Useful Commands
 
@@ -49,26 +41,10 @@ Audit an analysis directory:
 python skills/chemlflow-analysis-curator/scripts/audit_analysis.py <analysis-dir>
 ```
 
-For a common 5-fold DOE with 680 valid child executions and 136 scientific parent rows:
-
-```bash
-python skills/chemlflow-analysis-curator/scripts/audit_analysis.py <analysis-dir> \
-  --expected-valid-children 680 \
-  --expected-valid-parents 136 \
-  --expected-folds 5 \
-  --primary-metric r2
-```
-
 Run analysis after jobs finish, adapting paths to the user's environment:
 
 ```bash
 python analysis.py --orchestrator-job-id <job-id> --orchestrator-log-prefix <prefix> --logs-dir <logs-dir> --doe-dir <doe-dir> --output-dir <analysis-dir>
-```
-
-Run local analysis after `scripts/run_doe_local.py` or manually executed generated configs:
-
-```bash
-python analysis.py --backend local --doe-dir <doe-dir> --output-dir <analysis-dir>
 ```
 
 ## References

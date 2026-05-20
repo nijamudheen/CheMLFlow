@@ -114,11 +114,110 @@ def fetch_tdc(output_file: str, source: dict) -> int:
         return 1
 
 
+def fetch_local_npy(output_file: str, source: dict) -> int:
+    """Load a .npy time-series and persist it as the canonical raw .npz.
+
+    Required source keys:
+        path: filesystem path to a 1-D or 2-D .npy file.
+    Optional:
+        time_axis: 'rows', 'cols', or 'auto' (default 'auto').
+                   Selects which axis carries time when the array is 2-D.
+    """
+    input_path = source.get("path")
+    if not input_path:
+        logging.error("Missing source.path for data_source=local_npy")
+        return 1
+    if not os.path.exists(input_path):
+        logging.error("Local .npy not found: %s", input_path)
+        return 1
+
+    time_axis = str(source.get("time_axis", "auto")).strip().lower() or "auto"
+
+    # Lazy import keeps GetData decoupled from numpy until a TS source is used.
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+    try:
+        from utilities import timeseries_io
+    finally:
+        sys.path.pop(0)
+
+    try:
+        data = timeseries_io.load_npy_timeseries(input_path, time_axis=time_axis)
+    except Exception as exc:
+        logging.error("Failed to load .npy time-series from %s: %s", input_path, exc)
+        return 1
+
+    timeseries_io.save_raw_timeseries(
+        output_file,
+        data,
+        source_meta={
+            "data_source": "local_npy",
+            "path": str(input_path),
+            "time_axis": time_axis,
+            "shape": list(data.shape),
+        },
+    )
+    return 0
+
+
+def fetch_local_ts_csv(output_file: str, source: dict) -> int:
+    """Load a CSV time-series (one row per timestep) into the canonical .npz.
+
+    Required source keys:
+        path: filesystem path to the CSV.
+    Optional:
+        has_header: bool, default True. If False, all columns are treated as data.
+        time_column: str (column name) or int (index) to drop before stacking.
+    """
+    input_path = source.get("path")
+    if not input_path:
+        logging.error("Missing source.path for data_source=local_ts_csv")
+        return 1
+    if not os.path.exists(input_path):
+        logging.error("Local time-series CSV not found: %s", input_path)
+        return 1
+
+    has_header = source.get("has_header", True)
+    if isinstance(has_header, str):
+        has_header = has_header.strip().lower() in {"1", "true", "yes", "on"}
+    time_column = source.get("time_column")
+
+    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+    try:
+        from utilities import timeseries_io
+    finally:
+        sys.path.pop(0)
+
+    try:
+        data = timeseries_io.load_csv_timeseries(
+            input_path,
+            has_header=bool(has_header),
+            time_column=time_column,
+        )
+    except Exception as exc:
+        logging.error("Failed to load CSV time-series from %s: %s", input_path, exc)
+        return 1
+
+    timeseries_io.save_raw_timeseries(
+        output_file,
+        data,
+        source_meta={
+            "data_source": "local_ts_csv",
+            "path": str(input_path),
+            "has_header": bool(has_header),
+            "time_column": time_column,
+            "shape": list(data.shape),
+        },
+    )
+    return 0
+
+
 DATA_SOURCE_REGISTRY: Dict[str, Callable[[str, dict], int]] = {
     "chembl": fetch_chembl,
     "local_csv": fetch_local_csv,
     "http_csv": fetch_http_csv,
     "tdc": fetch_tdc,
+    "local_npy": fetch_local_npy,
+    "local_ts_csv": fetch_local_ts_csv,
 }
 
 

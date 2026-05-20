@@ -61,18 +61,6 @@ Run a pipeline by setting `CHEMLFLOW_CONFIG` and executing `main.py` from repo r
 
 CHEMLFLOW_CONFIG=<path-to-runtime-config.yaml> python main.py
 
-For a generated DOE directory, run valid execution children locally and then
-analyze them without Slurm:
-
-```bash
-python scripts/run_doe_local.py --doe-dir config/generated/<study> --max-workers 1 --resume
-python analysis.py --backend local --doe-dir config/generated/<study> --output-dir config/generated/<study>/analysis_local
-```
-
-The local runner writes a backend-neutral `execution_manifest.jsonl` plus
-per-case logs. Local analysis combines that execution-attempt manifest with each
-case's `run_status.json` and metrics files.
-
 Note:
 - Runtime config files are user-provided in this repo. Build one from `docs/config-options.md`
   or define an experiment batch with [docs/doe.md](docs/doe.md).

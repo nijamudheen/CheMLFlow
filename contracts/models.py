@@ -44,6 +44,11 @@ class CuratedRow(BaseRow):
     class_: Optional[str] = Field(default=None, alias="class")
 
 
+class LipinskiRow(BaseRow):
+    canonical_smiles: Optional[str] = None
+    class_: Optional[str] = Field(default=None, alias="class")
+
+
 class PIC50Row(BaseRow):
     pIC50: Optional[float] = None
     canonical_smiles: Optional[str] = None
@@ -105,6 +110,20 @@ CURATE_OUTPUT_CONTRACT = ContractSpec(
     description="Curated dataset; requires canonical_smiles for downstream chemistry steps.",
     required_columns=["canonical_smiles"],
     sample_model=CuratedRow,
+)
+
+FEATURIZE_LIPINSKI_INPUT_CONTRACT = ContractSpec(
+    name="featurize_lipinski_input",
+    description="Requires canonical_smiles; remove featurize.lipinski if dataset lacks SMILES.",
+    required_columns=["canonical_smiles"],
+    sample_model=CuratedRow,
+)
+
+FEATURIZE_LIPINSKI_OUTPUT_CONTRACT = ContractSpec(
+    name="featurize_lipinski_output",
+    description="Lipinski descriptors appended to input dataset.",
+    required_columns=["canonical_smiles"],
+    sample_model=LipinskiRow,
 )
 
 LABEL_IC50_INPUT_CONTRACT = ContractSpec(
@@ -301,6 +320,12 @@ TRAIN_OUTPUT_CONTRACT = ContractSpec(
     output_kind="dir",
     description="Output directory for trained model artifacts.",
     sample_model=None,
+)
+
+LIPINSKI_CONTRACT = ContractSpec(
+    name="lipinski",
+    required_columns=["canonical_smiles"],
+    sample_model=LipinskiRow,
 )
 
 PIC50_3CLASS_CONTRACT = ContractSpec(

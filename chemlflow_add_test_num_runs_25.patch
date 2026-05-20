@@ -1,0 +1,201 @@
+diff -ruN -x __pycache__ ~/MLModels/training/timeseries_nvar.py /mnt/data/CheMLFlow-main-test-runs-patched/MLModels/training/timeseries_nvar.py
+--- ~/MLModels/training/timeseries_nvar.py	2026-05-14 07:32:33.356619529 +0000
++++ ~/MLModels/training/timeseries_nvar.py	2026-05-14 08:27:14.012810929 +0000
+@@ -86,6 +86,7 @@
+ 
+     # Repeated stochastic runs
+     optuna_num_runs: int = 5          # notebook-compatible repeated validation runs per Optuna trial
++    test_num_runs: int = 25           # final independent test trainings after Optuna/fixed params
+ 
+     # Reproducibility
+     base_seed: int = 2025
+@@ -149,6 +150,7 @@
+         "lbfgs_max_iter",
+         "lbfgs_history_size",
+         "optuna_num_runs",
++        "test_num_runs",
+     ):
+         if key in model_params:
+             setattr(cfg, key, int(model_params[key]))
+@@ -868,15 +870,13 @@
+             global_random_state=int(global_random_state),
+         )
+         # Merge searched best_params into the user's fixed params and rerun
+-        # the standard train+eval path once with method=fixed, producing the
+-        # usual on-disk artifacts. User-supplied YAML values for searched
++        # the final train+test protocol. User-supplied YAML values for searched
+         # axes are intentionally overridden by best_params here; that's the
+         # whole point of running the search.
+         merged_params = {**model_params, **best_params}
+-        # Strip the tuning block from the recursive call so it doesn't loop.
+         train_block_for_final = dict(train_block or {})
+         train_block_for_final["tuning"] = {"method": "fixed"}
+-        result = _train_timeseries_nvar_once(
++        return _train_timeseries_nvar_repeated_final(
+             model_type=model_type,
+             raw_path=raw_path,
+             output_dir=output_dir,
+@@ -886,7 +886,6 @@
+             global_random_state=int(global_random_state),
+             optuna_summary=study_summary,
+         )
+-        return result
+ 
+     if tuning_method not in {"fixed", ""}:
+         raise ValueError(
+@@ -894,7 +893,7 @@
+             "expected 'fixed' or 'optuna'."
+         )
+ 
+-    return _train_timeseries_nvar_once(
++    return _train_timeseries_nvar_repeated_final(
+         model_type=model_type,
+         raw_path=raw_path,
+         output_dir=output_dir,
+@@ -906,6 +905,135 @@
+     )
+ 
+ 
++def _horizon_mean_std(rows: list[dict[str, Any]], horizons: tuple[int, ...]) -> dict[str, Any]:
++    """Return mean/std over repeated final runs for each horizon key."""
++    out: dict[str, Any] = {}
++    for h in horizons:
++        key = f"rmse_h{h}"
++        vals = [float(row[key]) for row in rows if key in row and row[key] is not None and np.isfinite(row[key])]
++        if vals:
++            out[f"{key}_mean"] = float(np.mean(vals))
++            out[f"{key}_std"] = float(np.std(vals, ddof=1)) if len(vals) > 1 else 0.0
++    out["num_runs"] = int(len(rows))
++    out["runs"] = rows
++    return out
++
++
++def _train_timeseries_nvar_repeated_final(
++    *,
++    model_type: str,
++    raw_path: str,
++    output_dir: str,
++    model_params: dict[str, Any],
++    train_block: dict[str, Any],
++    split_block: dict[str, Any],
++    global_random_state: int,
++    optuna_summary: Optional[dict[str, Any]],
++) -> TimeSeriesTrainResult:
++    """Run the final training/testing protocol, optionally repeated 25 times.
++
++    Optuna is already finished before this function is called. Therefore these
++    repetitions are not hyperparameter trials; they are independent final test
++    trainings with the selected fixed hyperparameters.
++    """
++    cfg0 = parse_training_config(
++        model_type=model_type,
++        model_params=model_params,
++        train_block=train_block,
++        global_random_state=global_random_state,
++    )
++    num_runs = max(1, int(cfg0.test_num_runs))
++
++    if num_runs <= 1:
++        return _train_timeseries_nvar_once(
++            model_type=model_type,
++            raw_path=raw_path,
++            output_dir=output_dir,
++            model_params=model_params,
++            train_block=train_block,
++            split_block=split_block,
++            global_random_state=int(global_random_state),
++            optuna_summary=optuna_summary,
++        )
++
++    LOGGER.info("Running %d independent final test runs for %s", num_runs, model_type)
++    first_result: Optional[TimeSeriesTrainResult] = None
++    run_rows: list[dict[str, Any]] = []
++    primary_key = f"rmse_h{max(cfg0.horizons)}"
++
++    for run_idx in range(num_runs):
++        run_seed = int(cfg0.base_seed) + run_idx
++        run_params = dict(model_params or {})
++        run_params["base_seed"] = run_seed
++        # Avoid recursive repetition inside each individual final run.
++        run_params["test_num_runs"] = 1
++
++        run_output_dir = output_dir if run_idx == 0 else os.path.join(output_dir, f"test_run_{run_idx:02d}")
++        os.makedirs(run_output_dir, exist_ok=True)
++
++        result = _train_timeseries_nvar_once(
++            model_type=model_type,
++            raw_path=raw_path,
++            output_dir=run_output_dir,
++            model_params=run_params,
++            train_block=train_block,
++            split_block=split_block,
++            global_random_state=run_seed,
++            optuna_summary=optuna_summary if run_idx == 0 else None,
++        )
++        if first_result is None:
++            first_result = result
++
++        with open(result.metrics_path, "r", encoding="utf-8") as f:
++            payload = json.load(f)
++        test_metrics = payload.get("test_rmse_horizons", {}) or {}
++        val_metrics = payload.get("val_rmse_horizons", {}) or {}
++        row = {
++            "run_index": int(run_idx),
++            "seed": int(run_seed),
++            **{k: float(v) for k, v in test_metrics.items() if isinstance(v, (int, float))},
++            **{f"val_{k}": float(v) for k, v in val_metrics.items() if isinstance(v, (int, float))},
++        }
++        run_rows.append(row)
++
++    assert first_result is not None
++
++    test_stats = _horizon_mean_std(run_rows, cfg0.horizons)
++    rmse_mean_key = f"{primary_key}_mean"
++    rmse_std_key = f"{primary_key}_std"
++
++    # Update the main run's metrics JSON so downstream analysis sees the 25-run mean.
++    with open(first_result.metrics_path, "r", encoding="utf-8") as f:
++        main_metrics = json.load(f)
++    main_metrics["rmse_single_run"] = main_metrics.get("rmse")
++    main_metrics["rmse"] = test_stats.get(rmse_mean_key, main_metrics.get("rmse"))
++    main_metrics["rmse_std"] = test_stats.get(rmse_std_key)
++    main_metrics["test_num_runs"] = int(num_runs)
++    main_metrics["test_rmse_horizons_repeated"] = test_stats
++    if optuna_summary is not None:
++        main_metrics["tuning"] = optuna_summary
++    with open(first_result.metrics_path, "w", encoding="utf-8") as f:
++        json.dump(main_metrics, f, indent=2, default=_json_default)
++
++    # Also update split_metrics.json while preserving the usual train/val/test keys.
++    split_metrics_path = main_metrics.get("split_metrics_path")
++    if split_metrics_path and os.path.exists(split_metrics_path):
++        with open(split_metrics_path, "r", encoding="utf-8") as f:
++            split_metrics = json.load(f)
++        split_metrics["test_repeated"] = test_stats
++        with open(split_metrics_path, "w", encoding="utf-8") as f:
++            json.dump(split_metrics, f, indent=2, default=_json_default)
++
++    LOGGER.info(
++        "Repeated final test complete: %s mean=%s std=%s over %d runs",
++        primary_key,
++        test_stats.get(rmse_mean_key),
++        test_stats.get(rmse_std_key),
++        num_runs,
++    )
++    return first_result
++
++
+ def _train_timeseries_nvar_once(
+     *,
+     model_type: str,
+diff -ruN -x __pycache__ ~/config/doe_timeseries.yaml /mnt/data/CheMLFlow-main-test-runs-patched/config/doe_timeseries.yaml
+--- ~/config/doe_timeseries.yaml	2026-05-14 07:32:33.358461789 +0000
++++ ~/config/doe_timeseries.yaml	2026-05-14 08:27:14.013481296 +0000
+@@ -42,6 +42,7 @@
+   train.model.params.num_windows: 10
+   train.model.params.horizons: [25, 50, 75, 100]
+   train.model.params.optuna_num_runs: 5      # notebook uses num_runs=5 inside Optuna validation
++  train.model.params.test_num_runs: 25       # final independent test trainings; report mean ± std
+   train.model.params.adam_patience: 200
+   train.model.params.lbfgs_patience: 200
+   train.model.params.max_epochs_adam: 5000      # final-retrain budget

@@ -1,0 +1,208 @@
+diff -ruN ~/MLModels/training/dl_registry.py /mnt/data/CheMLFlow-main/MLModels/training/dl_registry.py
+--- ~/MLModels/training/dl_registry.py	2026-05-14 07:32:33.489197127 +0000
++++ ~/MLModels/training/dl_registry.py	2026-05-14 07:32:33.357570232 +0000
+@@ -307,6 +307,7 @@
+                 "dataset_noise_scale": 0.0,
+                 "horizons": [25, 50, 75, 100],
+                 "num_windows": 10,
++                "optuna_num_runs": 5,
+             },
+         )
+ 
+diff -ruN ~/MLModels/training/timeseries_nvar.py /mnt/data/CheMLFlow-main/MLModels/training/timeseries_nvar.py
+--- ~/MLModels/training/timeseries_nvar.py	2026-05-14 07:32:33.491130107 +0000
++++ ~/MLModels/training/timeseries_nvar.py	2026-05-14 07:32:33.356619529 +0000
+@@ -84,6 +84,9 @@
+     horizons: tuple[int, ...] = (25, 50, 75, 100)
+     num_windows: int = 10            # windows per evaluation segment
+ 
++    # Repeated stochastic runs
++    optuna_num_runs: int = 5          # notebook-compatible repeated validation runs per Optuna trial
++
+     # Reproducibility
+     base_seed: int = 2025
+ 
+@@ -145,6 +148,7 @@
+         "lbfgs_patience",
+         "lbfgs_max_iter",
+         "lbfgs_history_size",
++        "optuna_num_runs",
+     ):
+         if key in model_params:
+             setattr(cfg, key, int(model_params[key]))
+@@ -534,6 +538,7 @@
+     connectome_adj: Optional[np.ndarray],
+     seed: int,
+     tmp_save_path: str,
++    num_runs: int = 1,
+ ) -> Optional[float]:
+     """Train once, run val rollout, return val RMSE at largest horizon.
+ 
+@@ -544,51 +549,67 @@
+ 
+     d = int(sliced_clean.d)
+     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+-    _seed_everything(seed)
++    primary_h = max(cfg.horizons)
++    primary_key = f"rmse_h{primary_h}"
+ 
+-    # Re-apply training-time noise with the trial seed so each trial sees a
+-    # consistent, reproducible training signal independent of trial number.
+-    np.random.seed(int(seed) + 1)
++    # Match the notebook protocol: repeat each Optuna trial over several
++    # stochastic initializations, but keep the training-time noise realization
++    # fixed for the case. In the notebook, X_train is created once before
++    # Optuna and only torch seeds change inside the run loop.
++    np.random.seed(int(cfg.base_seed) + 1)
+     train_with_noise = _add_relative_gaussian_noise(sliced_noisy.train, cfg.train_noise_scale)
+ 
+-    try:
+-        model = _build_model(
+-            model_type=model_type,
+-            cfg=cfg,
+-            d=d,
+-            connectome_adj=connectome_adj,
+-        )
+-        X_train_t = _torchify(train_with_noise, device=device)
+-        model, _ = _train_adaptive_nvar(
+-            model=model,
+-            X_train=X_train_t,
+-            cfg=cfg,
+-            save_path=tmp_save_path,
+-            device=device,
+-        )
+-        X_full_t = _torchify(data_noisy, device=device)
+-        val_offset = split_cfg.warmup_len + split_cfg.train_len
+-        val_per_window, _, _, _ = _rollout_segment(
+-            model=model,
+-            X_full=X_full_t,
+-            seg_offset=val_offset,
+-            seg_true=sliced_clean.val,
+-            seg_noisy=sliced_noisy.val,
+-            cfg=cfg,
+-            device=device,
++    scores: list[float] = []
++    for run in range(max(1, int(num_runs))):
++        run_seed = int(seed) + int(run)
++        _seed_everything(run_seed)
++        run_save_path = (
++            tmp_save_path
++            if int(num_runs) <= 1
++            else f"{os.path.splitext(tmp_save_path)[0]}_run{run:02d}.pth"
+         )
+-    except ValueError as exc:
+-        # Misconfigured trial (e.g. k > train_len). Return None -> Optuna prunes.
+-        LOGGER.warning("Optuna trial pruned (build/train): %s", exc)
+-        return None
+-    except Exception as exc:
+-        LOGGER.warning("Optuna trial errored (build/train): %s", exc)
+-        return None
+ 
+-    primary_h = max(cfg.horizons)
+-    primary_key = f"rmse_h{primary_h}"
+-    val_rmse_map = _aggregate_horizon_rmse(val_per_window, cfg.horizons)
+-    return val_rmse_map.get(primary_key)
++        try:
++            model = _build_model(
++                model_type=model_type,
++                cfg=cfg,
++                d=d,
++                connectome_adj=connectome_adj,
++            )
++            X_train_t = _torchify(train_with_noise, device=device)
++            model, _ = _train_adaptive_nvar(
++                model=model,
++                X_train=X_train_t,
++                cfg=cfg,
++                save_path=run_save_path,
++                device=device,
++            )
++            X_full_t = _torchify(data_noisy, device=device)
++            val_offset = split_cfg.warmup_len + split_cfg.train_len
++            val_per_window, _, _, _ = _rollout_segment(
++                model=model,
++                X_full=X_full_t,
++                seg_offset=val_offset,
++                seg_true=sliced_clean.val,
++                seg_noisy=sliced_noisy.val,
++                cfg=cfg,
++                device=device,
++            )
++            val_rmse_map = _aggregate_horizon_rmse(val_per_window, cfg.horizons)
++            score = val_rmse_map.get(primary_key)
++            if score is not None and np.isfinite(score):
++                scores.append(float(score))
++        except ValueError as exc:
++            # Misconfigured trial (e.g. k > train_len). Return None -> Optuna prunes.
++            LOGGER.warning("Optuna trial pruned (build/train): %s", exc)
++            return None
++        except Exception as exc:
++            LOGGER.warning("Optuna trial errored (build/train): %s", exc)
++            return None
++
++    if not scores:
++        return None
++    return float(np.mean(scores))
+ 
+ 
+ def _run_optuna_timeseries(
+@@ -753,8 +774,9 @@
+             data_noisy=data_noisy,
+             split_cfg=split_cfg,
+             connectome_adj=connectome_adj,
+-            seed=_trial_seed(global_random_state, trial.number),
++            seed=int(global_random_state),
+             tmp_save_path=tmp_save_path,
++            num_runs=int(effective_params.get("optuna_num_runs", 5)),
+         )
+         if score is None or not np.isfinite(score):
+             raise optuna.exceptions.TrialPruned("invalid score")
+@@ -791,6 +813,7 @@
+         "best_params": dict(best.params),
+         "search_axes": sorted(search_space.keys()),
+         "trial_epoch_cap": trial_epoch_cap,
++        "optuna_num_runs": int(user_model_params.get("optuna_num_runs", registry_defaults.get("optuna_num_runs", 5))),
+     }
+     LOGGER.info(
+         "Optuna search complete: best val RMSE=%.6f, best_params=%s",
+diff -ruN ~/config/doe_timeseries.yaml /mnt/data/CheMLFlow-main/config/doe_timeseries.yaml
+--- ~/config/doe_timeseries.yaml	2026-05-14 07:32:33.368923959 +0000
++++ ~/config/doe_timeseries.yaml	2026-05-14 07:32:33.358461789 +0000
+@@ -41,6 +41,7 @@
+   train.model.params.weight_decay: 0.0
+   train.model.params.num_windows: 10
+   train.model.params.horizons: [25, 50, 75, 100]
++  train.model.params.optuna_num_runs: 5      # notebook uses num_runs=5 inside Optuna validation
+   train.model.params.adam_patience: 200
+   train.model.params.lbfgs_patience: 200
+   train.model.params.max_epochs_adam: 5000      # final-retrain budget
+diff -ruN ~n/submit_gpu.sb /mnt/data/CheMLFlow-main/submit_gpu.sb
+--- ~/submit_gpu.sb	2026-05-14 07:32:33.365558256 +0000
++++ ~/submit_gpu.sb	2026-05-14 07:32:33.354734269 +0000
+@@ -88,7 +88,7 @@
+ # Make dataset source path absolute
+ dataset = spec.setdefault("dataset", {})
+ source = dataset.setdefault("source", {})
+-if source.get("type") == "local_csv" and "path" in source:
++if source.get("type") in {"local_csv", "local_npy", "local_npz"} and "path" in source:
+     p = Path(source["path"])
+     if not p.is_absolute():
+         # Resolve relative to the DOE source file location or project root
+# @@ -144,7 +144,7 @@
+#  ###############################################################################
+#  # Submit child jobs
+#  ###############################################################################
+# -DL_MODELS=(dl_simple dl_deep dl_gru dl_resmlp dl_tabtransformer dl_aereg)
+# +DL_MODELS=(dl_simple dl_deep dl_gru dl_resmlp dl_tabtransformer dl_aereg dl_adaptive_nvar dl_connectome_nvar)
+ 
+#  for line in "${VALID_CONFIGS[@]}"; do
+#    cfg="${line%%$'\t'*}"
+# @@ -158,7 +158,7 @@
+#      # gpu_args+=(--partition=gpu)
+#    fi
+ 
+# -  sbatch \
+# +  sbatch "${gpu_args[@]}" \
+#      --job-name="pgp_${case_name}" \
+#      --ntasks=1 \
+#      --cpus-per-task=4 \

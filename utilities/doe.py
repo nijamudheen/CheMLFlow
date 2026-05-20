@@ -71,9 +71,15 @@ class ProfileSpec:
     supports_explain: bool
 
     def allows_model(self, model_type: str) -> bool:
+        allowed = set(self.allowed_models)
         if model_type.startswith(DL_PREFIX):
-            return any(entry == f"{DL_PREFIX}*" for entry in self.allowed_models)
-        return model_type in set(self.allowed_models)
+            # Two ways to allow a dl_* model:
+            #   1. The profile lists it by exact name (e.g. "dl_adaptive_nvar"
+            #      for ts_forecast), restricting which DL models are valid.
+            #   2. The profile uses the wildcard "dl_*", accepting any DL model
+            #      (the tabular regression/classification profiles do this).
+            return model_type in allowed or f"{DL_PREFIX}*" in allowed
+        return model_type in allowed
 
     def allows_feature_input(self, feature_input: str) -> bool:
         return feature_input in set(self.allowed_feature_inputs)
@@ -155,6 +161,22 @@ PROFILE_SPECS: dict[str, ProfileSpec] = {
         default_source="tdc",
         allowed_feature_inputs=("none",),
         allowed_models=("catboost_classifier",),
+        supports_label_normalize=False,
+        supports_label_ic50=False,
+        supports_split=False,
+        supports_analyze=False,
+        supports_explain=False,
+    ),
+    "ts_forecast": ProfileSpec(
+        name="ts_forecast",
+        task_type="regression",
+        train_node="train.timeseries",
+        default_source="local_npy",
+        # Time-series pipelines bypass tabular feature_input entirely; the
+        # profile pins it to "none" so DOE generation does not attempt to
+        # vary featurize.* axes that do not exist on this branch.
+        allowed_feature_inputs=("none",),
+        allowed_models=("dl_adaptive_nvar", "dl_connectome_nvar"),
         supports_label_normalize=False,
         supports_label_ic50=False,
         supports_split=False,
@@ -652,6 +674,8 @@ def resolve_profile(dataset_cfg: dict[str, Any], probe: dict[str, Any]) -> Profi
 
     task = _resolve_task_type(dataset_cfg, probe)
     source_type = str(probe.get("source_type", "local_csv")).strip().lower()
+    if source_type in {"local_npy", "local_ts_csv"}:
+        return PROFILE_SPECS["ts_forecast"]
     if source_type == "tdc":
         if task != "classification":
             raise DOEGenerationError("source.type=tdc currently supports classification benchmark profile only.")
@@ -823,6 +847,9 @@ def _build_pipeline_nodes(
 ) -> list[str]:
     if profile.train_node == "train.tdc":
         return ["train.tdc"]
+    if profile.train_node == "train.timeseries":
+        # Time-series pipelines bypass curate / featurize / split / preprocess.
+        return ["get_data", "train.timeseries"]
 
     nodes: list[str] = ["get_data", "curate"]
     if profile.supports_label_ic50:
@@ -958,6 +985,16 @@ def _build_case_config(
             get_data_cfg["source"]["group"] = str(source_cfg.get("group", "ADME"))
             if source_cfg.get("name"):
                 get_data_cfg["source"]["name"] = str(source_cfg.get("name"))
+        elif source_type == "local_npy":
+            get_data_cfg["source"]["path"] = str(source_cfg.get("path", ""))
+            if source_cfg.get("time_axis"):
+                get_data_cfg["source"]["time_axis"] = str(source_cfg.get("time_axis"))
+        elif source_type == "local_ts_csv":
+            get_data_cfg["source"]["path"] = str(source_cfg.get("path", ""))
+            if "has_header" in source_cfg:
+                get_data_cfg["source"]["has_header"] = bool(source_cfg.get("has_header"))
+            if source_cfg.get("time_column") is not None:
+                get_data_cfg["source"]["time_column"] = source_cfg.get("time_column")
         if "get_data.max_rows" in merged:
             get_data_cfg["max_rows"] = int(merged["get_data.max_rows"])
         config["get_data"] = get_data_cfg
@@ -1101,7 +1138,7 @@ def _build_case_config(
         config["split"] = split_cfg
 
     has_configurable_featurizer = any(
-        node in {"featurize.morgan", "featurize.rdkit", "featurize.rdkit_labeled"}
+        node in {"featurize.morgan", "featurize.rdkit", "featurize.rdkit_labeled", "featurize.lipinski"}
         for node in nodes
     )
     if has_configurable_featurizer:
@@ -1117,7 +1154,7 @@ def _build_case_config(
         if preprocess_cfg:
             config["preprocess"] = preprocess_cfg
 
-    if "train" in nodes:
+    if "train" in nodes or "train.timeseries" in nodes:
         model_cfg: dict[str, Any] = {"type": model_type}
         model_params = _extract_prefixed(merged, "train.model.params.")
         if model_params:
@@ -1145,25 +1182,47 @@ def _build_case_config(
         reporting_cfg = _extract_prefixed(merged, "train.reporting.")
         if reporting_cfg:
             train_cfg["reporting"] = reporting_cfg
-        early_cfg = _extract_prefixed(merged, "train.early_stopping.")
-        if "patience" not in early_cfg:
-            early_cfg["patience"] = int(merged.get("train.early_stopping.patience", 20))
-        train_cfg["early_stopping"] = early_cfg
-        features_cfg = _extract_prefixed(merged, "train.features.")
-        if (
-            "label.normalize" in nodes
-            and feature_input == "featurize.none"
-            and isinstance(config.get("label"), dict)
-        ):
-            source_column = str(config["label"].get("source_column", "")).strip()
-            if source_column:
-                exclude_columns = _as_str_list(features_cfg.get("exclude_columns"))
-                if source_column not in exclude_columns:
-                    exclude_columns.append(source_column)
-                features_cfg["exclude_columns"] = exclude_columns
-        if features_cfg:
-            train_cfg["features"] = features_cfg
+        # train.timeseries doesn't use early_stopping/features in the tabular sense,
+        # so we only emit those blocks for the standard `train` node.
+        if "train" in nodes:
+            early_cfg = _extract_prefixed(merged, "train.early_stopping.")
+            if "patience" not in early_cfg:
+                early_cfg["patience"] = int(merged.get("train.early_stopping.patience", 20))
+            train_cfg["early_stopping"] = early_cfg
+            features_cfg = _extract_prefixed(merged, "train.features.")
+            if (
+                "label.normalize" in nodes
+                and feature_input == "featurize.none"
+                and isinstance(config.get("label"), dict)
+            ):
+                source_column = str(config["label"].get("source_column", "")).strip()
+                if source_column:
+                    exclude_columns = _as_str_list(features_cfg.get("exclude_columns"))
+                    if source_column not in exclude_columns:
+                        exclude_columns.append(source_column)
+                    features_cfg["exclude_columns"] = exclude_columns
+            if features_cfg:
+                train_cfg["features"] = features_cfg
         config["train"] = train_cfg
+
+    # train.timeseries uses a top-level `split:` block to specify warmup/train/
+    # val/test segment lengths. These are *time-series* split lengths, not the
+    # molecule-index splits that the standard `split` node produces.
+    if "train.timeseries" in nodes:
+        split_cfg: dict[str, Any] = {}
+        for key in ("warmup_len", "train_len", "val_len", "test_len"):
+            merged_key = f"split.{key}"
+            if merged_key in merged:
+                split_cfg[key] = int(merged[merged_key])
+        # Pull defaults from the dataset block so a DOE doesn't have to repeat them.
+        dataset_split = (
+            dataset_cfg.get("split", {}) if isinstance(dataset_cfg.get("split"), dict) else {}
+        )
+        for key in ("warmup_len", "train_len", "val_len", "test_len"):
+            if key not in split_cfg and key in dataset_split:
+                split_cfg[key] = int(dataset_split[key])
+        if split_cfg:
+            config["split"] = split_cfg
 
     if "train.tdc" in nodes:
         train_tdc_cfg: dict[str, Any] = {
@@ -1207,15 +1266,17 @@ def _validate_case(
 
     has_train = "train" in nodes
     has_train_tdc = "train.tdc" in nodes
+    has_train_ts = "train.timeseries" in nodes
     has_preprocess = "preprocess.features" in nodes
     has_select = "select.features" in nodes
     source_type = str(_get_dotted(config, "get_data.data_source", profile.default_source)).strip().lower()
-    if has_train and has_train_tdc:
+    train_node_count = int(has_train) + int(has_train_tdc) + int(has_train_ts)
+    if train_node_count > 1:
         _add_issue(
             issues,
             code="DOE_TRAIN_NODE_CONFLICT",
             path="pipeline.nodes",
-            message="Use either train or train.tdc, not both.",
+            message="Use only one of train, train.tdc, or train.timeseries.",
         )
     if "explain" in nodes and not (has_train or has_train_tdc):
         _add_issue(
@@ -1273,7 +1334,7 @@ def _validate_case(
                 )
 
     model_type = ""
-    if has_train:
+    if has_train or has_train_ts:
         model_type = str(_get_dotted(config, "train.model.type", "")).strip()
     elif has_train_tdc:
         model_type = str(_get_dotted(config, "train_tdc.model.type", "")).strip()

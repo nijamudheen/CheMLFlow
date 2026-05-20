@@ -202,4 +202,181 @@ def build_dl_search_config(
             },
         )
 
+    if model_type in {"dl_adaptive_nvar", "dl_connectome_nvar"}:
+        raise ValueError(
+            f"Model {model_type!r} is a time-series model and cannot be used "
+            "with the standard tabular `train` node. "
+            "Use the `train.timeseries` pipeline node and pipeline_type=timeseries; "
+            "see config/timeseries_mg_demo.yaml. The matching search space lives "
+            "in build_timeseries_dl_search_config(...) in this same module."
+        )
+
     raise ValueError(f"Unsupported model type: {model_type}")
+
+
+# ---------------------------------------------------------------------------
+# Time-series DL search configs
+# ---------------------------------------------------------------------------
+#
+# The tabular DL search above is reached via `MLModels.training.torch_models.
+# run_optuna`, which assumes (input_dim -> 1) regression on a tabular X, y.
+# Time-series models — Adaptive NVAR and Connectome NVAR — train differently
+# (Adam->L-BFGS on residual targets, scored by autoregressive rollout), so
+# they get a parallel entry point. The search space dict format is identical
+# to the tabular one (`type` in {"categorical","float","int"}, etc.), and the
+# time-series trainer's Optuna driver translates each spec to the same
+# trial.suggest_* call. Keeping the format identical lets users reason about
+# search spaces uniformly across all dl_* models.
+#
+# Each architecture gets its own registry entry so that:
+#   1. Adaptive NVAR (MLP feature block) and Connectome NVAR (fixed-graph
+#      feature block) have independent search spaces — they don't share the
+#      hidden_dim vs n_connectome axis, the input_scaling axis, etc.
+#   2. New time-series models can be added without disturbing existing ones.
+
+
+def build_timeseries_dl_search_config(
+    *,
+    model_type: str,
+    dl_search_config_cls: Callable[..., Any],
+):
+    """Return a search_config for a time-series DL model.
+
+    Parameters
+    ----------
+    model_type:
+        One of `dl_adaptive_nvar`, `dl_connectome_nvar`.
+    dl_search_config_cls:
+        The same DLSearchConfig dataclass used by the tabular path. We pass a
+        placeholder model_class because building an actual nn.Module requires
+        runtime data (delay-embedding dimension `dk = d * k`, connectome
+        adjacency, etc.) that only exists inside the trainer. The time-series
+        Optuna driver constructs models directly from sampled params rather
+        than going through `config.model_class`.
+
+    Returns
+    -------
+    A DLSearchConfig with `search_space` and `default_params` populated.
+    The `model_class` is set to a no-op factory; callers should consult
+    `default_params` and `search_space` and instantiate the model themselves.
+    """
+    model_type = str(model_type).strip().lower()
+
+    def _unused_model_class(params: dict[str, Any]):  # pragma: no cover - placeholder
+        raise RuntimeError(
+            "Time-series DL search configs do not build models via "
+            "config.model_class; the time-series trainer constructs models "
+            "directly from sampled hyperparameters. See "
+            "MLModels.training.timeseries_nvar.run_optuna_timeseries."
+        )
+
+    if model_type == "dl_adaptive_nvar":
+        # Mirrors `Optuna_MG_Adaptive_NVAR_0percent_noise.ipynb` (notebook 2).
+        # Architectural axes:
+        #   - k:          delay-embedding length. Small k underfits chaotic
+        #                 dynamics; large k inflates dk = d*k.
+        #   - hidden_dim: MLP feature width. Bigger -> more capacity but
+        #                 longer L-BFGS phase.
+        # Optimization axes:
+        #   - lr_adam:    log-scale; Adam pre-trains the MLP before L-BFGS.
+        #   - lr_lbfgs:   linear scale, narrow band; full L-BFGS step size.
+        return dl_search_config_cls(
+            model_class=_unused_model_class,
+            search_space={
+                # Notebook-faithful values from
+                # Optuna_MG_Adaptive_NVAR_0percent_noise.ipynb:
+                #   k_grid         = [2, 10, 30, 50]
+                #   hidden_dim_grid= [10, 20, 50, 100, 200, 500, 1000]
+                #   adam_lr_grid   = [1e-4, 1e-3, 1e-2]
+                #   lbfgs_lr_grid  = [1.0, 0.5, 0.1]
+                "k": {"type": "categorical", "choices": [2, 10, 30, 50]},
+                "hidden_dim": {
+                    "type": "categorical",
+                    "choices": [10, 20, 50, 100, 200, 500, 1000],
+                },
+                "lr_adam": {
+                    "type": "categorical",
+                    "choices": [1e-4, 1e-3, 1e-2],
+                },
+                "lr_lbfgs": {"type": "categorical", "choices": [1.0, 0.5, 0.1]},
+            },
+            default_params={
+                "k": 5,
+                "hidden_dim": 200,
+                "lr_adam": 1e-3,
+                "lr_lbfgs": 1.0,
+                # The remaining knobs are not searched by default; they come
+                # from train.model.params in the runtime config.
+                "max_epochs_adam": 5000,
+                "adam_patience": 200,
+                "num_epochs_lbfgs": 50000,
+                "lbfgs_patience": 200,
+                "weight_decay": 0.0,
+                "train_noise_scale": 0.05,
+                "dataset_noise_scale": 0.0,
+                "horizons": [25, 50, 75, 100],
+                "num_windows": 10,
+                "optuna_num_runs": 5,
+            },
+        )
+
+    if model_type == "dl_connectome_nvar":
+        # Mirrors `Adaptive_NVAR_optuna_connectome.ipynb` (notebook 1).
+        # Architectural axes specific to the connectome variant:
+        #   - n_connectome:    subgraph size selected from the full adjacency.
+        #                      Decoupled from `hidden_dim` (which AdaptiveNVAR
+        #                      uses) on purpose — they are not interchangeable.
+        #   - input_scaling:   initial scale of the input projection weights;
+        #                      the connectome layer is sensitive to this.
+        #   - weight_decay:    log-scale, includes 0 via the "0.0" choice.
+        return dl_search_config_cls(
+            model_class=_unused_model_class,
+            search_space={
+                "k": {"type": "categorical", "choices": [2, 5, 10, 20, 30, 40, 50]},
+                "n_connectome": {
+                    "type": "categorical",
+                    "choices": [25, 50, 75, 100, 150, 200, 250, 300],
+                },
+                "input_scaling": {
+                    "type": "categorical",
+                    "choices": [0.02, 0.05, 0.10, 0.20, 0.50],
+                },
+                "lr_adam": {
+                    "type": "categorical",
+                    "choices": [1e-4, 3e-4, 1e-3, 3e-3, 1e-2],
+                },
+                "lr_lbfgs": {"type": "categorical", "choices": [1.0, 0.5, 0.1]},
+                "weight_decay": {
+                    "type": "categorical",
+                    "choices": [0.0, 1e-8, 1e-6, 1e-4],
+                },
+            },
+            default_params={
+                "k": 5,
+                "n_connectome": 100,
+                "input_scaling": 0.10,
+                "lr_adam": 1e-3,
+                "lr_lbfgs": 1.0,
+                "weight_decay": 0.0,
+                "max_epochs_adam": 5000,
+                "adam_patience": 200,
+                "num_epochs_lbfgs": 50000,
+                "lbfgs_patience": 200,
+                "train_noise_scale": 0.05,
+                "dataset_noise_scale": 0.0,
+                "horizons": [25, 50, 75, 100],
+                "num_windows": 10,
+                # Connectome-specific defaults; these are not searched. To vary
+                # them across cases, put them in DOE search_space (e.g.
+                # connectome_mode: [connectome, connectome_randomized]).
+                "connectome_mode": "connectome",
+                "connectome_selection_mode": "top_degree",
+                "connectome_normalization": "maxabs",
+                "connectome_binarize": False,
+            },
+        )
+
+    raise ValueError(
+        f"Unsupported time-series model_type: {model_type!r}. "
+        "Expected one of: dl_adaptive_nvar, dl_connectome_nvar."
+    )

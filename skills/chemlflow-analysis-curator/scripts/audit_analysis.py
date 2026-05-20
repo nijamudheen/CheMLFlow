@@ -75,6 +75,7 @@ def audit(
     failed_jobs = analysis_dir / "failed_job_ids.txt"
 
     issues: list[str] = []
+    observations: list[str] = []
     report: dict[str, Any] = {}
     if report_path.exists():
         report = json.loads(report_path.read_text(encoding="utf-8"))
@@ -167,6 +168,21 @@ def audit(
     if agg_bad_states:
         issues.append(f"aggregated rows contain non-completed states: {agg_bad_states}")
 
+    metric_artifacts = report.get("metric_artifacts")
+    primary_metric_complete: bool | None = None
+    split_diagnostics_complete: bool | None = None
+    if isinstance(metric_artifacts, dict):
+        primary_metric_complete = metric_artifacts.get("primary_metric_complete")
+        split_diagnostics_complete = metric_artifacts.get("split_diagnostics_complete")
+        if primary_metric_complete is False:
+            issues.append("report.metric_artifacts.primary_metric_complete is false")
+        if split_diagnostics_complete is False:
+            missing_split = metric_artifacts.get("missing_split_metrics", "")
+            observations.append(
+                "split diagnostics are incomplete"
+                + (f" (missing_split_metrics={missing_split})" if missing_split != "" else "")
+            )
+
     if "scaler" not in agg_fields:
         issues.append("all_runs_metrics.csv has no scaler column")
     if "scaler" not in raw_fields:
@@ -222,6 +238,9 @@ def audit(
     final_issues = issues
     reported_issues = [] if allow_partial else final_issues
 
+    ranking_ready = not final_issues
+    final_claim_ready = ranking_ready and split_diagnostics_complete is not False
+
     return {
         "analysis_dir": str(analysis_dir),
         "report_exists": report_path.exists(),
@@ -236,6 +255,9 @@ def audit(
         "mapping_mismatch": mapping_mismatch,
         "state_counts": state_counts,
         "failure_reason_counts": failure_reason_counts,
+        "metric_artifacts": metric_artifacts if isinstance(metric_artifacts, dict) else {},
+        "primary_metric_complete": primary_metric_complete,
+        "split_diagnostics_complete": split_diagnostics_complete,
         "raw_states": _counts(raw_rows, "state"),
         "aggregated_states": _counts(agg_rows, "state"),
         "raw_features": _counts(raw_rows, "feature_input"),
@@ -248,9 +270,10 @@ def audit(
             agg_rows, ("slice_count", "completed_slices", "failed_slices")
         ),
         "nonfinite_metric_rows": nonfinite_metric_rows[:25],
-        "final_claim_ready": not final_issues,
+        "ranking_ready": ranking_ready,
+        "final_claim_ready": final_claim_ready,
         "issues": reported_issues,
-        "observations": final_issues,
+        "observations": final_issues + observations,
     }
 
 

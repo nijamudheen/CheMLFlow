@@ -18,9 +18,12 @@ Use this skill to prove a CheMLFlow analysis result is complete, balanced, and i
 5. Check every aggregated CV row has complete slices, usually `slice_count=5`, `completed_slices=5`, `failed_slices=0`.
 6. Verify `scaler`, `feature_input`, `model_type`, and `split_strategy` distributions are balanced for the DOE design.
 7. Separate expected special cases from problems. For example, `chemprop` and `chemeleon` usually appear under `smiles_native`, not Morgan/RDKit.
-8. Report failures, missing statuses, incomplete folds, row-count mismatches, suspicious metric path gaps, and non-finite ranking metrics before discussing best models.
-9. Treat ranking as blocked unless the audit reports `final_claim_ready: true`.
-10. Identify the execution backend. Local DOE analysis should come from `analysis.py --backend local`, not fabricated Slurm logs or fake `sacct` rows.
+8. For source-paper or named benchmark datasets, check whether expected literature baselines are present. For SMILES benchmarks this often means `chemprop`; for foundation comparisons this may mean `chemeleon`.
+9. If Chemprop/CheMeleon baselines are missing, distinguish dependency/checkpoint unavailability from scientific exclusion. Dependency preflight success is not a metric result; completed SMILES-native execution children are required before ranking those baselines.
+10. Report failures, missing statuses, incomplete folds, row-count mismatches, suspicious metric path gaps, non-finite ranking metrics, and missing expected baselines before discussing best models.
+11. Distinguish primary-metric completeness from split-diagnostic completeness. Missing split metrics limits overfit/underfit conclusions, but should not block ranking if every completed aggregate row has finite top-level primary metrics and the audit reports `ranking_ready: true`.
+12. Treat final benchmark/generalization claims as blocked unless the audit reports `final_claim_ready: true`.
+13. Identify the execution backend. Local DOE analysis should come from `analysis.py --backend local`, not fabricated Slurm logs or fake `sacct` rows.
 
 ## Standard Checks
 
@@ -33,9 +36,13 @@ Use this skill to prove a CheMLFlow analysis result is complete, balanced, and i
 - Aggregated metrics rows equal completed scientific parents with complete slices.
 - `scaler` is present and populated when the DOE varied `preprocess.scaler`.
 - Morgan and RDKit row counts match for non-native models when both feature branches are in the DOE.
+- Chemprop/CheMeleon rows appear under `feature_input=smiles_native` when those baselines are in scope.
+- Chemprop/CheMeleon dependency preflight notes, checkpoint availability, and skipped-baseline rationale are consistent with the generated manifest and completed execution rows.
+- If a final answer compares against a source paper, the analysis either includes a comparable model family or explicitly says the study is only a classical/tabular baseline.
 - Split strategy counts match for random/scaffold comparisons.
 - `failed_case_configs.txt` and `failed_job_ids.txt` are empty for final complete runs.
 - Ranking metrics are finite in every complete aggregate row used for a final claim.
+- `report.metric_artifacts.split_diagnostics_complete` is true when making overfit/underfit or train/test generalization-gap claims. If it is false but primary metrics are complete, report ranking as primary-metric-only.
 
 The rule is audit first, rank second. If the audit script exits nonzero, do not summarize "best models" as final results.
 

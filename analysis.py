@@ -846,6 +846,45 @@ def _job_missing_split_metrics(job: ChildJob) -> bool:
     return _extract_primary_metric(split_metrics) is None
 
 
+def _job_has_top_level_metric(job: ChildJob) -> bool:
+    if job.state != "COMPLETED" or not job.config_path:
+        return False
+    cfg_path = Path(job.config_path)
+    cfg = _load_yaml_config(cfg_path)
+    if not cfg:
+        return False
+    run_dir = _run_dir_from_config(cfg)
+    train_cfg = cfg.get("train") if isinstance(cfg.get("train"), dict) else {}
+    train_model_cfg = train_cfg.get("model") if isinstance(train_cfg.get("model"), dict) else {}
+    model_type = job.model_type or str(train_model_cfg.get("type", "")).strip()
+    if not run_dir or not model_type:
+        return False
+    metrics_path = _resolve_metrics_path(run_dir, model_type)
+    metrics_payload = _load_json(metrics_path)
+    if not isinstance(metrics_payload, dict):
+        return False
+    for metric in ("auc", "r2", "mae", "rmse", "accuracy", "f1", "auprc"):
+        if _safe_float(metrics_payload.get(metric)) is not None:
+            return True
+    return False
+
+
+def _summarize_metric_artifacts(jobs: list[ChildJob]) -> dict[str, Any]:
+    completed_jobs = [job for job in jobs if job.state == "COMPLETED"]
+    missing_metrics = sum(1 for job in completed_jobs if _job_missing_expected_metrics(job))
+    missing_split_metrics = sum(1 for job in completed_jobs if _job_missing_split_metrics(job))
+    top_level_metric_jobs = sum(1 for job in completed_jobs if _job_has_top_level_metric(job))
+    return {
+        "completed_jobs": len(completed_jobs),
+        "missing_metrics": missing_metrics,
+        "top_level_metric_jobs": top_level_metric_jobs,
+        "split_metric_jobs": len(completed_jobs) - missing_split_metrics,
+        "missing_split_metrics": missing_split_metrics,
+        "primary_metric_complete": missing_metrics == 0,
+        "split_diagnostics_complete": missing_split_metrics == 0,
+    }
+
+
 def _mark_missing_metric_jobs(jobs: list[ChildJob]) -> list[ChildJob]:
     updated: list[ChildJob] = []
     for job in jobs:
@@ -855,14 +894,6 @@ def _mark_missing_metric_jobs(jobs: list[ChildJob]) -> list[ChildJob]:
                     job,
                     state="PARTIAL",
                     failure_reason=_append_failure_reason(job.failure_reason, "missing_metrics"),
-                )
-            )
-        elif _job_missing_split_metrics(job):
-            updated.append(
-                replace(
-                    job,
-                    state="PARTIAL",
-                    failure_reason=_append_failure_reason(job.failure_reason, "missing_split_metrics"),
                 )
             )
         else:
@@ -1705,6 +1736,7 @@ def _write_analysis_outputs(
     raw_all_runs_metric_rows = _build_all_runs_metric_rows(jobs)
     all_runs_metric_rows = _aggregate_all_runs_metric_rows(raw_all_runs_metric_rows)
     config_summary = _summarize_scientific_configs(all_runs_metric_rows)
+    report["metric_artifacts"] = _summarize_metric_artifacts(jobs)
     raw_overfit_records = _build_generalization_records(
         jobs=jobs,
         overfit_threshold=overfit_threshold,

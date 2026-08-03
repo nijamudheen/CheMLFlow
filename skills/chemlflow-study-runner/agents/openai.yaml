@@ -1,4 +1,4 @@
 interface:
   display_name: "CheMLFlow Study Runner"
-  short_description: "Coordinate end-to-end CheMLFlow experiment workflows."
-  default_prompt: "Use this skill to route CheMLFlow study work through dataset profiling, config/DOE design, local or Slurm execution, analysis, and audit without bypassing CheMLFlow's operating system."
+  short_description: "Plan and run approval-gated CheMLFlow studies"
+  default_prompt: "Use $chemlflow-study-runner to profile this dataset, ask the required study-design questions, prepare a dashboard preview, and run only after my approval."

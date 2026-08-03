@@ -337,18 +337,23 @@ Controls molecular featurization (converting SMILES to numeric descriptors).
 **Example:**
 ```yaml
 featurize:
-  radius: 3
-  n_bits: 4096
+  checkpoint: models/chemeleon_mp.pt
+  batch_size: 64
+  device: auto
 ```
 
-**Keys (for `featurize.morgan`):**
+**Keys:**
 
-| Key | Default | Description |
-|-----|---------|-------------|
-| `radius` | `2` | Morgan fingerprint radius (higher = more structural context). |
-| `n_bits` | `2048` | Fingerprint bit vector length. |
+| Key | Applies to | Default | Description |
+|-----|------------|---------|-------------|
+| `radius` | `featurize.morgan`, `featurize.ecfp4_rdkit` | `2` | Morgan fingerprint radius. ECFP4 requires radius 2. |
+| `n_bits` | `featurize.morgan`, `featurize.ecfp4_rdkit` | `2048` | Fingerprint bit-vector length. |
+| `checkpoint` | `featurize.chemeleon_fp` | required | Existing local `chemeleon_mp.pt`; CheMLFlow does not download it implicitly. |
+| `batch_size` | `featurize.chemeleon_fp` | `64` | Molecules encoded per frozen CheMeleon batch. |
+| `device` | `featurize.chemeleon_fp` | `auto` | Torch device (`auto`, `cpu`, `cuda`, or `mps` where supported). |
 
-> **Note:** `featurize.rdkit` uses fixed settings and does not accept additional config keys.
+> **Note:** `featurize.rdkit` is the RDKit2D descriptor representation and uses fixed settings.
+> `featurize.chemeleon_fp` emits one frozen, mean-pooled 2,048-number vector per valid molecule and preserves `__row_index` alignment.
 > `label.ic50` only needs `standard_value` and can run directly on curated ChemBL data.
 
 ## `preprocess` Block
@@ -358,10 +363,12 @@ Controls feature preprocessing (variance filtering, correlation removal, scaling
 **Example:**
 ```yaml
 preprocess:
-  scaler: robust
-  variance_threshold: 0.1
-  corr_threshold: 0.9
-  stable_features_k: 100
+  scaler: standard
+  variance_threshold: null
+  corr_threshold: 1.0
+  clip:
+    min: -6
+    max: 6
 ```
 
 **Keys (for `preprocess.features` and `select.features`):**
@@ -369,11 +376,14 @@ preprocess:
 | Key | Default | Description |
 |-----|---------|-------------|
 | `scaler` | `robust` | Feature scaling strategy before variance/correlation filtering. One of `robust`, `standard`, `minmax`, `none`. `minmax` uses clipped held-out transforms to keep values in `[0, 1]`. |
-| `variance_threshold` | `0.16` | Remove features with variance below this threshold. |
+| `variance_threshold` | `0.16` | Remove features with variance at or below this threshold. Set `null` to preserve all columns. |
 | `corr_threshold` | `0.95` | Remove one of each pair of features with correlation above this. |
-| `clip_range` | `[-1e10, 1e10]` | Clip feature values to this range before processing. |
+| `clip.min`, `clip.max` | absent | Optional post-scaling bounds. If `clip` is absent, no clipping is applied. Bounds must be finite and satisfy `min < max`. |
+| `clip_range` | absent | Legacy two-value spelling retained for compatibility; do not combine it with `clip`. |
 | `stable_features_k` | `50` | Number of top features to keep in `select.features`. |
 | `random_state` | (from global) | Seed for any randomized preprocessing steps. |
+
+The scaler and feature filters are fit on the training split only and then applied to validation/test rows. Clipping happens after that transform. Thus `scaler: standard` plus `clip: {min: -6, max: 6}` is one preprocessing recipe, not a new scaler.
 
 ## `train` Block
 

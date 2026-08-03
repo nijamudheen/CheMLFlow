@@ -4,13 +4,16 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
+import threading
 import time
+import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 try:
     import yaml
@@ -174,8 +177,38 @@ def _case_name(record: dict[str, Any], config_path: Path) -> str:
     return value or config_path.stem
 
 
-def _log_path_for(record: dict[str, Any], config_path: Path, logs_dir: Path) -> Path:
-    return logs_dir / f"{_case_name(record, config_path)}.log"
+def _log_path_for(
+    record: dict[str, Any],
+    config_path: Path,
+    logs_dir: Path,
+    attempt_id: str,
+) -> Path:
+    return logs_dir / _case_name(record, config_path) / f"{attempt_id}.log"
+
+
+def _next_execution_sequence(rows: list[dict[str, Any]]) -> int:
+    highest = 0
+    for row in rows:
+        match = re.fullmatch(r"local_(\d+)", str(row.get("execution_id", "")))
+        if match:
+            highest = max(highest, int(match.group(1)))
+    return highest + 1
+
+
+def _attempt_counts_by_case(rows: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for row in rows:
+        if str(row.get("record_type", "")).strip().lower() != "execution_attempt":
+            continue
+        case_id = str(row.get("case_id", "")).strip()
+        if case_id:
+            current = counts.get(case_id, 0)
+            try:
+                recorded = int(row.get("attempt_number", 0))
+            except (TypeError, ValueError):
+                recorded = 0
+            counts[case_id] = max(current + 1, recorded)
+    return counts
 
 
 def _base_output_record(
@@ -185,6 +218,9 @@ def _base_output_record(
     run_dir: Path | None,
     log_path: Path,
     sequence: int,
+    attempt_id: str,
+    attempt_number: int,
+    invocation_id: str,
     state: str,
     return_code: int | None,
     start_time: str,
@@ -198,6 +234,9 @@ def _base_output_record(
         "record_type": "execution_attempt",
         "backend": "local",
         "execution_id": f"local_{sequence:05d}",
+        "attempt_id": attempt_id,
+        "attempt_number": attempt_number,
+        "invocation_id": invocation_id,
         "local_job_id": f"local_{sequence:05d}",
         "scheduler_job_id": "",
         "case_id": record.get("case_id", ""),
@@ -236,10 +275,15 @@ def _run_one(
     main_path: Path,
     resume: bool,
     dry_run: bool,
+    on_update: Callable[[dict[str, Any]], None] | None = None,
+    attempt_number: int = 1,
+    invocation_id: str = "",
 ) -> dict[str, Any]:
     config_path = _resolve_config_path(str(record.get("config_path", "")), doe_dir=doe_dir)
     run_dir = _run_dir_for_config(config_path)
-    log_path = _log_path_for(record, config_path, logs_dir)
+    invocation_id = invocation_id or f"local_invocation_{uuid.uuid4().hex}"
+    attempt_id = f"local_attempt_{uuid.uuid4().hex}"
+    log_path = _log_path_for(record, config_path, logs_dir, attempt_id)
     existing_status = _load_run_status(run_dir)
 
     start_time = _utc_now()
@@ -251,6 +295,9 @@ def _run_one(
             run_dir=run_dir,
             log_path=log_path,
             sequence=sequence,
+            attempt_id=attempt_id,
+            attempt_number=attempt_number,
+            invocation_id=invocation_id,
             state="DRY_RUN",
             return_code=None,
             start_time=start_time,
@@ -265,6 +312,9 @@ def _run_one(
             run_dir=run_dir,
             log_path=log_path,
             sequence=sequence,
+            attempt_id=attempt_id,
+            attempt_number=attempt_number,
+            invocation_id=invocation_id,
             state="SKIPPED",
             return_code=0,
             start_time=start_time,
@@ -281,15 +331,65 @@ def _run_one(
         log_fh.write(f"[local-doe] config={config_path}\n")
         log_fh.write(f"[local-doe] run_dir={run_dir or ''}\n")
         log_fh.flush()
-        completed = subprocess.run(
-            [python_bin, str(main_path)],
-            cwd=str(REPO_ROOT),
-            env=env,
-            stdout=log_fh,
-            stderr=subprocess.STDOUT,
-            text=True,
-            check=False,
-        )
+        if on_update is not None:
+            on_update(
+                _base_output_record(
+                    record,
+                    config_path=config_path,
+                    run_dir=run_dir,
+                    log_path=log_path,
+                    sequence=sequence,
+                    attempt_id=attempt_id,
+                    attempt_number=attempt_number,
+                    invocation_id=invocation_id,
+                    state="RUNNING",
+                    return_code=None,
+                    start_time=start_time,
+                    end_time="",
+                    elapsed_seconds=0.0,
+                )
+            )
+        try:
+            completed = subprocess.run(
+                [python_bin, str(main_path)],
+                cwd=str(REPO_ROOT),
+                env=env,
+                stdout=log_fh,
+                stderr=subprocess.STDOUT,
+                text=True,
+                check=False,
+            )
+        except BaseException as exc:
+            end_time = _utc_now()
+            interrupted = isinstance(exc, KeyboardInterrupt)
+            state = "CANCELLED" if interrupted else "FAILED"
+            reason_prefix = "interrupted" if interrupted else "launch_exception"
+            failure_reason = f"{reason_prefix}:{type(exc).__name__}"
+            log_fh.write(f"\n[local-doe] end={end_time}\n")
+            log_fh.write(f"[local-doe] state={state}\n")
+            log_fh.write(f"[local-doe] failure_reason={failure_reason}\n")
+            log_fh.write(f"[local-doe] exception={exc}\n")
+            terminal = _base_output_record(
+                record,
+                config_path=config_path,
+                run_dir=run_dir,
+                log_path=log_path,
+                sequence=sequence,
+                attempt_id=attempt_id,
+                attempt_number=attempt_number,
+                invocation_id=invocation_id,
+                state=state,
+                return_code=None,
+                start_time=start_time,
+                end_time=end_time,
+                elapsed_seconds=time.monotonic() - monotonic_start,
+                failure_reason=failure_reason,
+            )
+            if on_update is not None:
+                on_update(terminal)
+            if isinstance(exc, (OSError, subprocess.SubprocessError)):
+                return terminal
+            raise
         end_time = _utc_now()
         log_fh.write(f"\n[local-doe] end={end_time}\n")
         log_fh.write(f"[local-doe] return_code={completed.returncode}\n")
@@ -302,6 +402,9 @@ def _run_one(
         run_dir=run_dir,
         log_path=log_path,
         sequence=sequence,
+        attempt_id=attempt_id,
+        attempt_number=attempt_number,
+        invocation_id=invocation_id,
         state=state,
         return_code=completed.returncode,
         start_time=start_time,
@@ -319,7 +422,9 @@ def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
     tmp_path.replace(path)
 
 
-def _duplicate_artifact_dirs(records: list[dict[str, Any]], doe_dir: Path) -> dict[str, dict[str, list[str]]]:
+def _duplicate_artifact_dirs(
+    records: list[dict[str, Any]], doe_dir: Path
+) -> dict[str, dict[str, list[str]]]:
     seen: dict[tuple[str, str], list[str]] = {}
     for record in records:
         config_path = _resolve_config_path(str(record.get("config_path", "")), doe_dir=doe_dir)
@@ -341,7 +446,11 @@ def _duplicate_artifact_dirs(records: list[dict[str, Any]], doe_dir: Path) -> di
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     doe_dir = Path(args.doe_dir)
-    manifest_path = Path(args.manifest) if str(args.manifest).strip() else doe_dir / "manifest.jsonl"
+    manifest_path = (
+        Path(args.manifest)
+        if str(args.manifest).strip()
+        else doe_dir / "manifest.jsonl"
+    )
     output_manifest = (
         Path(args.output_manifest)
         if str(args.output_manifest).strip()
@@ -386,11 +495,43 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(duplicates, indent=2, sort_keys=True), file=sys.stderr)
             return 2
 
-    results: list[dict[str, Any]] = []
+    history = _read_jsonl(output_manifest) if output_manifest.exists() else []
+    history_indexes = {
+        str(row.get("attempt_id")): index
+        for index, row in enumerate(history)
+        if str(row.get("attempt_id", "")).strip()
+    }
+    current_results: dict[str, dict[str, Any]] = {}
+    results_lock = threading.Lock()
     failed = False
+    invocation_id = f"local_invocation_{uuid.uuid4().hex}"
+    next_sequence = _next_execution_sequence(history)
+    attempt_counts = _attempt_counts_by_case(history)
+    scheduled: list[tuple[int, int, dict[str, Any]]] = []
+    for offset, record in enumerate(records):
+        config_path = _resolve_config_path(
+            str(record.get("config_path", "")), doe_dir=doe_dir
+        )
+        case_id = _case_name(record, config_path)
+        attempt_counts[case_id] = attempt_counts.get(case_id, 0) + 1
+        scheduled.append((next_sequence + offset, attempt_counts[case_id], record))
+
+    def persist_result(result: dict[str, Any]) -> None:
+        attempt_id = str(result.get("attempt_id", ""))
+        if not attempt_id:
+            raise ValueError("Local execution records must define attempt_id.")
+        with results_lock:
+            current_results[attempt_id] = result
+            existing_index = history_indexes.get(attempt_id)
+            if existing_index is None:
+                history_indexes[attempt_id] = len(history)
+                history.append(result)
+            else:
+                history[existing_index] = result
+            _write_jsonl(output_manifest, history)
 
     if max_workers == 1 or args.stop_on_failure:
-        for sequence, record in enumerate(records, start=1):
+        for sequence, attempt_number, record in scheduled:
             result = _run_one(
                 record,
                 sequence=sequence,
@@ -400,9 +541,11 @@ def main(argv: list[str] | None = None) -> int:
                 main_path=main_path,
                 resume=bool(args.resume),
                 dry_run=bool(args.dry_run),
+                on_update=persist_result,
+                attempt_number=attempt_number,
+                invocation_id=invocation_id,
             )
-            results.append(result)
-            _write_jsonl(output_manifest, results)
+            persist_result(result)
             print(
                 "[local-doe] {case} {state} rc={rc} log={log}".format(
                     case=result.get("case_id") or Path(str(result["config_path"])).stem,
@@ -427,14 +570,15 @@ def main(argv: list[str] | None = None) -> int:
                     main_path=main_path,
                     resume=bool(args.resume),
                     dry_run=bool(args.dry_run),
+                    on_update=persist_result,
+                    attempt_number=attempt_number,
+                    invocation_id=invocation_id,
                 ): sequence
-                for sequence, record in enumerate(records, start=1)
+                for sequence, attempt_number, record in scheduled
             }
             for future in as_completed(futures):
                 result = future.result()
-                results.append(result)
-                results.sort(key=lambda row: str(row.get("execution_id", "")))
-                _write_jsonl(output_manifest, results)
+                persist_result(result)
                 print(
                     "[local-doe] {case} {state} rc={rc} log={log}".format(
                         case=result.get("case_id") or Path(str(result["config_path"])).stem,
@@ -444,16 +588,19 @@ def main(argv: list[str] | None = None) -> int:
                     )
                 )
 
-    results.sort(key=lambda row: str(row.get("execution_id", "")))
-    _write_jsonl(output_manifest, results)
+    invocation_results = sorted(
+        current_results.values(), key=lambda row: str(row.get("execution_id", ""))
+    )
+    _write_jsonl(output_manifest, history)
 
     counts: dict[str, int] = {}
-    for row in results:
-        counts[str(row.get("state", "UNKNOWN"))] = counts.get(str(row.get("state", "UNKNOWN")), 0) + 1
+    for row in invocation_results:
+        state = str(row.get("state", "UNKNOWN"))
+        counts[state] = counts.get(state, 0) + 1
     print(f"[local-doe] manifest: {output_manifest}")
     print(f"[local-doe] state_counts: {json.dumps(counts, sort_keys=True)}")
 
-    failed = failed or any(row.get("state") == "FAILED" for row in results)
+    failed = failed or any(row.get("state") == "FAILED" for row in invocation_results)
     return 1 if failed else 0
 
 

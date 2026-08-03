@@ -207,6 +207,178 @@ def test_run_doe_local_dry_run_writes_execution_manifest(tmp_path: Path) -> None
     assert rows[0]["config_path"] == str(config_path)
 
 
+def test_run_doe_local_preserves_retry_attempts_and_logs(tmp_path: Path) -> None:
+    doe_dir = tmp_path / "generated"
+    config_path = doe_dir / "case_0001.yaml"
+    _write_config(config_path, run_dir=tmp_path / "runs" / "case_0001", fold_index=0)
+    _write_manifest(
+        doe_dir,
+        [
+            {
+                "record_type": "execution_child",
+                "status": "valid",
+                "case_id": "case_0001",
+                "parent_case_id": "parent_0001",
+                "scientific_config_id": "sci_config_1",
+                "execution_label": "rep0_fold0",
+                "config_path": str(config_path),
+            }
+        ],
+    )
+    failed_main = tmp_path / "failed_main.py"
+    failed_main.write_text(
+        "print('first attempt failed')\nraise SystemExit(7)\n", encoding="utf-8"
+    )
+    successful_main = tmp_path / "successful_main.py"
+    successful_main.write_text("print('second attempt succeeded')\n", encoding="utf-8")
+
+    base_command = [
+        sys.executable,
+        str(REPO_ROOT / "scripts" / "run_doe_local.py"),
+        "--doe-dir",
+        str(doe_dir),
+        "--python",
+        sys.executable,
+    ]
+    failed = subprocess.run(
+        [*base_command, "--main", str(failed_main)],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    succeeded = subprocess.run(
+        [*base_command, "--main", str(successful_main)],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert failed.returncode == 1
+    assert succeeded.returncode == 0, succeeded.stderr
+    rows = [
+        json.loads(line)
+        for line in (doe_dir / "execution_manifest.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.strip()
+    ]
+    assert [row["state"] for row in rows] == ["FAILED", "COMPLETED"]
+    assert [row["attempt_number"] for row in rows] == [1, 2]
+    assert len({row["attempt_id"] for row in rows}) == 2
+    log_paths = [Path(row["log_path"]) for row in rows]
+    assert log_paths[0] != log_paths[1]
+    assert "first attempt failed" in log_paths[0].read_text(encoding="utf-8")
+    assert "second attempt succeeded" in log_paths[1].read_text(encoding="utf-8")
+    attempts_by_case, _ = analysis._index_execution_attempts(rows, doe_dir)
+    assert attempts_by_case["case_0001"]["state"] == "COMPLETED"
+
+
+def test_run_doe_local_appends_to_legacy_execution_manifest(tmp_path: Path) -> None:
+    doe_dir = tmp_path / "generated"
+    config_path = doe_dir / "case_0001.yaml"
+    _write_config(config_path, run_dir=tmp_path / "runs" / "case_0001", fold_index=0)
+    _write_manifest(
+        doe_dir,
+        [
+            {
+                "record_type": "execution_child",
+                "status": "valid",
+                "case_id": "case_0001",
+                "parent_case_id": "parent_0001",
+                "config_path": str(config_path),
+            }
+        ],
+    )
+    legacy = {
+        "record_type": "execution_attempt",
+        "backend": "local",
+        "execution_id": "local_00007",
+        "case_id": "case_0001",
+        "config_path": str(config_path),
+        "state": "FAILED",
+    }
+    _write_execution_manifest(doe_dir, [legacy])
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "run_doe_local.py"),
+            "--doe-dir",
+            str(doe_dir),
+            "--dry-run",
+        ],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    rows = [
+        json.loads(line)
+        for line in (doe_dir / "execution_manifest.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.strip()
+    ]
+    assert rows[0] == legacy
+    assert rows[1]["execution_id"] == "local_00008"
+    assert rows[1]["attempt_number"] == 2
+    assert rows[1]["state"] == "DRY_RUN"
+
+
+def test_run_doe_local_finalizes_manifest_on_process_launch_failure(
+    tmp_path: Path,
+) -> None:
+    doe_dir = tmp_path / "generated"
+    config_path = doe_dir / "case_0001.yaml"
+    _write_config(config_path, run_dir=tmp_path / "runs" / "case_0001", fold_index=0)
+    _write_manifest(
+        doe_dir,
+        [
+            {
+                "record_type": "execution_child",
+                "status": "valid",
+                "case_id": "case_0001",
+                "parent_case_id": "parent_0001",
+                "config_path": str(config_path),
+            }
+        ],
+    )
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "scripts" / "run_doe_local.py"),
+            "--doe-dir",
+            str(doe_dir),
+            "--python",
+            str(tmp_path / "missing-python"),
+        ],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 1
+    assert "Traceback" not in completed.stderr
+    rows = [
+        json.loads(line)
+        for line in (doe_dir / "execution_manifest.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+        if line.strip()
+    ]
+    assert len(rows) == 1
+    assert rows[0]["state"] == "FAILED"
+    assert rows[0]["end_time"]
+    assert rows[0]["failure_reason"] == "launch_exception:FileNotFoundError"
+    assert Path(rows[0]["log_path"]).is_file()
+
+
 def test_analysis_local_backend_uses_failed_execution_attempt_over_running_status(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -233,6 +405,18 @@ def test_analysis_local_backend_uses_failed_execution_attempt_over_running_statu
     execution_manifest = _write_execution_manifest(
         doe_dir,
         [
+            {
+                "record_type": "execution_attempt",
+                "backend": "local",
+                "execution_id": "local_00001",
+                "attempt_id": "local_attempt_original",
+                "attempt_number": 1,
+                "case_id": "case_0001",
+                "config_path": str(config_path),
+                "state": "COMPLETED",
+                "start_time": "2026-01-01T00:00:00+00:00",
+                "end_time": "2026-01-01T00:00:05+00:00",
+            },
             {
                 "record_type": "execution_attempt",
                 "backend": "local",
@@ -272,6 +456,101 @@ def test_analysis_local_backend_uses_failed_execution_attempt_over_running_statu
         rows = list(csv.DictReader(fh))
     assert rows[0]["state"] == "FAILED"
     assert rows[0]["log_path"].endswith("case_0001.log")
+
+
+def test_analysis_running_retry_ignores_stale_success_artifacts(
+    tmp_path: Path, monkeypatch
+) -> None:
+    doe_dir = tmp_path / "generated"
+    output_dir = tmp_path / "analysis_local"
+    config_path = doe_dir / "case_0001.yaml"
+    run_dir = tmp_path / "runs" / "case_0001"
+    _write_config(config_path, run_dir=run_dir, fold_index=0)
+    _write_run_status(run_dir, config_path=config_path, status="success")
+    _write_json(run_dir / "random_forest_metrics.json", {"r2": 0.91, "mae": 0.1})
+    _write_manifest(
+        doe_dir,
+        [
+            {
+                "record_type": "execution_child",
+                "status": "valid",
+                "case_id": "case_0001",
+                "parent_case_id": "parent_0001",
+                "config_path": str(config_path),
+            }
+        ],
+    )
+    execution_manifest = _write_execution_manifest(
+        doe_dir,
+        [
+            {
+                "record_type": "execution_attempt",
+                "backend": "local",
+                "execution_id": "local_00001",
+                "attempt_id": "local_attempt_original",
+                "attempt_number": 1,
+                "case_id": "case_0001",
+                "config_path": str(config_path),
+                "state": "COMPLETED",
+                "start_time": "2026-01-01T00:00:00+00:00",
+                "end_time": "2026-01-01T00:00:05+00:00",
+            },
+            {
+                "record_type": "execution_attempt",
+                "backend": "local",
+                "execution_id": "local_00002",
+                "attempt_id": "local_attempt_retry",
+                "attempt_number": 2,
+                "case_id": "case_0001",
+                "config_path": str(config_path),
+                "state": "RUNNING",
+                "start_time": "2026-08-03T12:00:00+00:00",
+                "log_path": str(doe_dir / "local_logs" / "retry.log"),
+            }
+        ],
+    )
+
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "analysis.py",
+            "--backend",
+            "local",
+            "--doe-dir",
+            str(doe_dir),
+            "--execution-manifest",
+            str(execution_manifest),
+            "--output-dir",
+            str(output_dir),
+        ],
+    )
+
+    assert analysis.main() == 0
+    report = json.loads((output_dir / "report.json").read_text(encoding="utf-8"))
+    assert report["state_counts"] == {"RUNNING": 1}
+    with (output_dir / "jobs.csv").open("r", encoding="utf-8", newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    assert rows[0]["state"] == "RUNNING"
+    assert rows[0]["failure_reason"] == "running"
+
+
+def test_analysis_running_attempt_accepts_current_success_artifact() -> None:
+    state, exit_code, failure_reason = analysis._merge_local_state(
+        run_status={
+            "status": "success",
+            "start_time": "2026-08-03T12:00:01+00:00",
+            "end_time": "2026-08-03T12:00:05+00:00",
+        },
+        attempt={
+            "state": "RUNNING",
+            "start_time": "2026-08-03T12:00:00+00:00",
+        },
+    )
+
+    assert state == "COMPLETED"
+    assert exit_code == "0"
+    assert failure_reason is None
 
 
 def test_analysis_local_backend_marks_success_without_metrics_partial(

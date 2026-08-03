@@ -86,3 +86,57 @@ def test_fit_preprocessor_rejects_unknown_scaler():
             clip_range=(-1e10, 1e10),
             scaler="banana",
         )
+
+
+def test_fit_preprocessor_does_not_clip_when_clip_is_absent():
+    X_train = pd.DataFrame({"a": [0.0, 1.0, 2.0]})
+    X_eval = pd.DataFrame({"a": [100.0]})
+
+    preprocessor = data_preprocessing.fit_preprocessor(
+        X_train,
+        variance_threshold=0.0,
+        corr_threshold=1.0,
+        clip_range=None,
+        scaler="standard",
+    )
+    transformed = data_preprocessing.transform_preprocessor(X_eval, preprocessor)
+
+    assert preprocessor["clip_range"] is None
+    assert transformed.iloc[0, 0] > 6.0
+
+
+def test_fit_preprocessor_clips_after_training_fold_standardization():
+    X_train = pd.DataFrame({"a": [0.0, 1.0, 2.0]})
+    X_eval = pd.DataFrame({"a": [-100.0, 100.0]})
+
+    preprocessor = data_preprocessing.fit_preprocessor(
+        X_train,
+        variance_threshold=0.0,
+        corr_threshold=1.0,
+        clip_range=(-6.0, 6.0),
+        scaler="standard",
+    )
+    transformed = data_preprocessing.transform_preprocessor(X_eval, preprocessor)
+
+    assert transformed["a"].tolist() == [-6.0, 6.0]
+
+
+def test_fit_preprocessor_can_disable_variance_filtering() -> None:
+    X_train = pd.DataFrame(
+        {
+            "constant": [1.0, 1.0, 1.0],
+            "variable": [0.0, 1.0, 2.0],
+        }
+    )
+
+    preprocessor = data_preprocessing.fit_preprocessor(
+        X_train,
+        variance_threshold=None,
+        corr_threshold=1.0,
+        clip_range=(-6.0, 6.0),
+        scaler="standard",
+    )
+    transformed = data_preprocessing.transform_preprocessor(X_train, preprocessor)
+
+    assert transformed.columns.tolist() == ["constant", "variable"]
+    assert transformed["constant"].tolist() == [0.0, 0.0, 0.0]

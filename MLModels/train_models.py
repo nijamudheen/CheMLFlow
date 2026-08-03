@@ -256,6 +256,7 @@ def train_chemprop_model(
     random_state: int = 42,
     task_type: str = "classification",
     model_config: Dict[str, Any] | None = None,
+    progress_reporter: Any | None = None,
 ) -> Tuple[object, TrainResult]:
     return training_chemprop_models.train_chemprop_model(
         curated_df=curated_df,
@@ -265,6 +266,7 @@ def train_chemprop_model(
         random_state=random_state,
         task_type=task_type,
         model_config=model_config,
+        progress_reporter=progress_reporter,
         row_index_col=_ROW_INDEX_COL,
         ensure_dir=_ensure_dir,
         require_chemprop=_require_chemprop,
@@ -322,6 +324,8 @@ def _seed_dl_runtime(seed: int) -> None:
 
 def _is_dl_model(model_type: str) -> bool:
     return training_model_factory.is_dl_model(model_type)
+
+
 def _train_dl(
     model,
     X_train: np.ndarray,
@@ -334,7 +338,8 @@ def _train_dl(
     patience: int,
     random_state: int = 42,
     task_type: str = "regression",
-    ) -> Dict[str, Any]:
+    progress_reporter: Any | None = None,
+) -> Dict[str, Any]:
     return training_torch_models.train_dl(
         model=model,
         X_train=X_train,
@@ -347,7 +352,9 @@ def _train_dl(
         patience=patience,
         random_state=random_state,
         task_type=task_type,
+        progress_reporter=progress_reporter,
     )
+
 
 def _predict_dl(model, X: np.ndarray, batch_size: int = 64) -> np.ndarray:
     return training_torch_models.predict_dl(model=model, X=X, batch_size=batch_size)
@@ -370,6 +377,7 @@ def train_model(
     model_config: Dict[str, Any] | None = None,
     X_val: pd.DataFrame | None = None,
     y_val: pd.Series | None = None,
+    progress_reporter: Any | None = None,
 ) -> Tuple[object, TrainResult]:
     return training_orchestrator.train_model(
         X_train=X_train,
@@ -388,6 +396,7 @@ def train_model(
         model_config=model_config,
         X_val=X_val,
         y_val=y_val,
+        progress_reporter=progress_reporter,
         dl_search_config_cls=DLSearchConfig,
         train_result_cls=TrainResult,
         ensure_dir=_ensure_dir,

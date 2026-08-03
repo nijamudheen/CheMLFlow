@@ -6,6 +6,8 @@ from typing import Any
 
 import numpy as np
 
+from .progress import emit
+
 
 def get_device():
     import torch
@@ -44,6 +46,7 @@ def train_dl(
     patience: int,
     random_state: int = 42,
     task_type: str = "regression",
+    progress_reporter: Any | None = None,
 ) -> dict[str, Any]:
     """Train a PyTorch model. Returns dict with model and best_params."""
     import torch
@@ -81,46 +84,94 @@ def train_dl(
 
     best_loss, best_state, wait = float("inf"), None, 0
 
-    for epoch in range(1, epochs + 1):
-        model.train()
-        for bx, by in loader:
-            optimizer.zero_grad()
-            out = model(bx)
-            if task_type == "classification":
-                loss = criterion(out.view(-1), by.view(-1))
-            else:
-                loss = criterion(out.view(-1, 1), by)
-            loss.backward()
-            optimizer.step()
+    emit(
+        progress_reporter,
+        "training_started",
+        "epoch",
+        unit="epoch",
+        total=int(epochs),
+        phase="training",
+        message="PyTorch training started.",
+    )
 
-        model.eval()
-        with torch.no_grad():
-            total_loss = 0.0
-            total_n = 0
-            for i in range(0, len(X_val_t), batch_size):
-                bx_val = X_val_t[i : i + batch_size]
-                by_val = y_val_t[i : i + batch_size]
-                outv = model(bx_val)
+    epoch = 0
+    try:
+        for epoch in range(1, epochs + 1):
+            model.train()
+            for bx, by in loader:
+                optimizer.zero_grad()
+                out = model(bx)
                 if task_type == "classification":
-                    batch_loss = criterion(outv.view(-1), by_val.view(-1))
+                    loss = criterion(out.view(-1), by.view(-1))
                 else:
-                    batch_loss = criterion(outv.view(-1, 1), by_val)
-                batch_n = int(bx_val.shape[0])
-                total_loss += float(batch_loss.item()) * batch_n
-                total_n += batch_n
-            val_loss = total_loss / total_n if total_n else float("inf")
+                    loss = criterion(out.view(-1, 1), by)
+                loss.backward()
+                optimizer.step()
 
-        if val_loss < best_loss - 1e-6:
-            best_loss = val_loss
-            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-            wait = 0
-            if epoch % 20 == 0:
-                logging.info("[Epoch %d] New best val_loss=%.4f", epoch, val_loss)
-        else:
-            wait += 1
+            model.eval()
+            with torch.no_grad():
+                total_loss = 0.0
+                total_n = 0
+                for i in range(0, len(X_val_t), batch_size):
+                    bx_val = X_val_t[i : i + batch_size]
+                    by_val = y_val_t[i : i + batch_size]
+                    outv = model(bx_val)
+                    if task_type == "classification":
+                        batch_loss = criterion(outv.view(-1), by_val.view(-1))
+                    else:
+                        batch_loss = criterion(outv.view(-1, 1), by_val)
+                    batch_n = int(bx_val.shape[0])
+                    total_loss += float(batch_loss.item()) * batch_n
+                    total_n += batch_n
+                val_loss = total_loss / total_n if total_n else float("inf")
+
+            if val_loss < best_loss - 1e-6:
+                best_loss = val_loss
+                best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+                wait = 0
+                if epoch % 20 == 0:
+                    logging.info("[Epoch %d] New best val_loss=%.4f", epoch, val_loss)
+            else:
+                wait += 1
+
+            emit(
+                progress_reporter,
+                "training_update",
+                "epoch",
+                current=epoch,
+                total=int(epochs),
+                phase="early_stopping" if wait else "training",
+                message=f"Validation epoch {epoch} complete.",
+                metrics={
+                    "val_loss": val_loss,
+                    "best_val_loss": best_loss,
+                    "patience_wait": wait,
+                },
+            )
             if wait >= patience:
                 logging.info("Early stopping at epoch %d", epoch)
                 break
+    except BaseException:
+        emit(
+            progress_reporter,
+            "training_scope_finished",
+            "epoch",
+            status="failed",
+            message="PyTorch training failed.",
+        )
+        raise
+
+    emit(
+        progress_reporter,
+        "training_scope_finished",
+        "epoch",
+        message=(
+            f"PyTorch training stopped after epoch {epoch}."
+            if epoch < epochs
+            else "PyTorch training completed."
+        ),
+        metrics={"best_val_loss": best_loss},
+    )
 
     if best_state:
         model.load_state_dict(best_state)

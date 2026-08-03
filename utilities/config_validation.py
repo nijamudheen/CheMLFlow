@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Any
 
 
@@ -33,6 +34,7 @@ _NODE_TO_BLOCK = {
     "featurize.rdkit_labeled": "featurize",
     "featurize.morgan": "featurize",
     "featurize.ecfp4_rdkit": "featurize",
+    "featurize.chemeleon_fp": "featurize",
     "preprocess.features": "preprocess",
     "select.features": "preprocess",
     "train": "train",
@@ -67,6 +69,7 @@ _FEATURE_INPUT_NODES = {
     "featurize.rdkit_labeled",
     "featurize.morgan",
     "featurize.ecfp4_rdkit",
+    "featurize.chemeleon_fp",
     "use.curated_features",
 }
 _CHEMPROP_LIKE_MODELS = {"chemprop", "chemeleon"}
@@ -79,7 +82,7 @@ _TIMESERIES_MODELS = {"dl_adaptive_nvar", "dl_connectome_nvar"}
 _FEATURE_INPUT_ALIASES = {
     "use.curated_features": "featurize.none",
 }
-_CLASSIFICATION_ONLY_MODELS = {"catboost_classifier"}
+_CLASSIFICATION_ONLY_MODELS = {"catboost_classifier", "tabpfn"}
 _DL_WILDCARD = "dl_*"
 _ARTIFACT_RETENTION_VALUES = {"full", "audit_light"}
 _GET_DATA_SAMPLE_STRATEGIES = {"random", "stratified"}
@@ -153,6 +156,7 @@ _RUNTIME_PROFILE_CONTRACTS: dict[str, dict[str, Any]] = {
             "featurize.rdkit",
             "featurize.morgan",
             "featurize.ecfp4_rdkit",
+            "featurize.chemeleon_fp",
         ),
         "allowed_models": ("random_forest", "svm", "decision_tree", "xgboost", "ensemble", "chemprop", "chemeleon", _DL_WILDCARD),
     },
@@ -164,6 +168,7 @@ _RUNTIME_PROFILE_CONTRACTS: dict[str, dict[str, Any]] = {
             "featurize.rdkit",
             "featurize.morgan",
             "featurize.ecfp4_rdkit",
+            "featurize.chemeleon_fp",
         ),
         "allowed_models": ("random_forest", "svm", "decision_tree", "xgboost", "ensemble", "chemprop", "chemeleon", _DL_WILDCARD),
     },
@@ -179,6 +184,7 @@ _RUNTIME_PROFILE_CONTRACTS: dict[str, dict[str, Any]] = {
             "featurize.rdkit",
             "featurize.morgan",
             "featurize.ecfp4_rdkit",
+            "featurize.chemeleon_fp",
         ),
         "allowed_models": (
             "random_forest",
@@ -189,6 +195,7 @@ _RUNTIME_PROFILE_CONTRACTS: dict[str, dict[str, Any]] = {
             "catboost_classifier",
             "chemprop",
             "chemeleon",
+            "tabpfn",
             _DL_WILDCARD,
         ),
     },
@@ -212,6 +219,8 @@ def _normalize_feature_input(value: Any) -> str:
 
 def _feature_input_from_nodes(nodes: list[str]) -> str | None:
     lowered = [str(node).strip().lower() for node in nodes]
+    if "featurize.chemeleon_fp" in lowered:
+        return "featurize.chemeleon_fp"
     if "featurize.ecfp4_rdkit" in lowered:
         return "featurize.ecfp4_rdkit"
     if "featurize.morgan" in lowered:
@@ -947,7 +956,7 @@ def collect_config_issues(config: dict[str, Any], nodes: list[str]) -> list[Vali
                     "preprocess.features/select.features require an explicit feature input node "
                     "("
                     "featurize.none/featurize.rdkit/featurize.rdkit_labeled/"
-                    "featurize.morgan/featurize.ecfp4_rdkit"
+                    "featurize.morgan/featurize.ecfp4_rdkit/featurize.chemeleon_fp"
                     "), "
                     "except for the Chemprop/CheMeleon no-op preprocess branch."
                 ),
@@ -963,7 +972,7 @@ def collect_config_issues(config: dict[str, Any], nodes: list[str]) -> list[Vali
                         "train for non-SMILES-native models requires an explicit feature input node "
                         "("
                         "featurize.none/featurize.rdkit/featurize.rdkit_labeled/"
-                        "featurize.morgan/featurize.ecfp4_rdkit"
+                        "featurize.morgan/featurize.ecfp4_rdkit/featurize.chemeleon_fp"
                         ")."
                     ),
                 )
@@ -1009,6 +1018,20 @@ def collect_config_issues(config: dict[str, Any], nodes: list[str]) -> list[Vali
                     code="CFG_CHEMELEON_CHECKPOINT_REQUIRED",
                     path="train.model.foundation_checkpoint",
                     message="CheMeleon runs require train.model.foundation_checkpoint.",
+                )
+            )
+
+    if "featurize.chemeleon_fp" in nodes:
+        featurize_cfg = _as_dict(config.get("featurize"))
+        if not str(featurize_cfg.get("checkpoint", "")).strip():
+            issues.append(
+                ValidationIssue(
+                    code="CFG_CHEMELEON_FP_CHECKPOINT_REQUIRED",
+                    path="featurize.checkpoint",
+                    message=(
+                        "featurize.chemeleon_fp requires featurize.checkpoint to point "
+                        "to the CheMeleon message-passing checkpoint."
+                    ),
                 )
             )
 
@@ -1169,6 +1192,74 @@ def collect_config_issues(config: dict[str, Any], nodes: list[str]) -> list[Vali
                     code="CFG_PREPROCESS_SCALER_INVALID",
                     path="preprocess.scaler",
                     message="preprocess.scaler must be one of: robust, standard, minmax, none.",
+                )
+            )
+
+    if "clip" in preprocess_cfg and "clip_range" in preprocess_cfg:
+        issues.append(
+            ValidationIssue(
+                code="CFG_PREPROCESS_CLIP_CONFLICT",
+                path="preprocess",
+                message="Use preprocess.clip or legacy preprocess.clip_range, not both.",
+            )
+        )
+
+    if "clip" in preprocess_cfg:
+        raw_clip = preprocess_cfg.get("clip")
+        clip_valid = isinstance(raw_clip, dict) and set(raw_clip) == {"min", "max"}
+        lower = upper = None
+        if clip_valid:
+            try:
+                lower = float(raw_clip["min"])
+                upper = float(raw_clip["max"])
+            except (TypeError, ValueError):
+                clip_valid = False
+        if clip_valid:
+            clip_valid = bool(
+                math.isfinite(lower)
+                and math.isfinite(upper)
+                and lower < upper
+            )
+        if not clip_valid:
+            issues.append(
+                ValidationIssue(
+                    code="CFG_PREPROCESS_CLIP_INVALID",
+                    path="preprocess.clip",
+                    message=(
+                        "preprocess.clip must be a mapping with exactly two finite numeric bounds "
+                        "satisfying min < max."
+                    ),
+                )
+            )
+
+    if "clip_range" in preprocess_cfg:
+        raw_clip_range = preprocess_cfg.get("clip_range")
+        legacy_valid = (
+            isinstance(raw_clip_range, (list, tuple))
+            and len(raw_clip_range) == 2
+        )
+        legacy_lower = legacy_upper = None
+        if legacy_valid:
+            try:
+                legacy_lower = float(raw_clip_range[0])
+                legacy_upper = float(raw_clip_range[1])
+            except (TypeError, ValueError):
+                legacy_valid = False
+        if legacy_valid:
+            legacy_valid = bool(
+                math.isfinite(legacy_lower)
+                and math.isfinite(legacy_upper)
+                and legacy_lower < legacy_upper
+            )
+        if not legacy_valid:
+            issues.append(
+                ValidationIssue(
+                    code="CFG_PREPROCESS_CLIP_INVALID",
+                    path="preprocess.clip_range",
+                    message=(
+                        "Legacy preprocess.clip_range must contain two finite numeric bounds "
+                        "satisfying lower < upper."
+                    ),
                 )
             )
 

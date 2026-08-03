@@ -12,7 +12,7 @@ import subprocess
 import sys
 from collections import Counter, defaultdict
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -455,6 +455,21 @@ def _failure_reason_from_attempt(attempt: dict[str, Any] | None) -> str | None:
     return None
 
 
+def _run_status_belongs_to_attempt(
+    run_status: dict[str, Any] | None,
+    attempt: dict[str, Any],
+) -> bool:
+    if not run_status:
+        return False
+    attempt_start = _parse_status_time(attempt.get("start_time"))
+    if attempt_start is None:
+        return True
+    status_start = _parse_status_time(run_status.get("start_time"))
+    if status_start is None:
+        return False
+    return status_start >= attempt_start - timedelta(seconds=2)
+
+
 def _merge_local_state(
     *,
     run_status: dict[str, Any] | None,
@@ -482,6 +497,11 @@ def _merge_local_state(
         if status_state == "COMPLETED":
             return "COMPLETED", "0", None
         return "SKIPPED", attempt_exit_code, attempt_failure or status_failure
+    if attempt_state == "RUNNING":
+        if _run_status_belongs_to_attempt(run_status, attempt):
+            if status_state in {"COMPLETED", "FAILED"}:
+                return status_state, status_exit_code, status_failure
+        return "RUNNING", attempt_exit_code, "running"
     if attempt_state == "COMPLETED":
         if status_state in {"COMPLETED", "UNKNOWN"}:
             return "COMPLETED", attempt_exit_code or "0", None

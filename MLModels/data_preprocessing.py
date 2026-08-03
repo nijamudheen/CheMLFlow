@@ -58,6 +58,15 @@ class _IdentityScaler:
         return np.asarray(X, dtype=float)
 
 
+class _IdentitySelector:
+    def fit_transform(self, X):
+        self.n_features_in_ = int(np.asarray(X).shape[1])
+        return np.asarray(X, dtype=float)
+
+    def transform(self, X):
+        return np.asarray(X, dtype=float)
+
+
 def _resolve_scaler(scaler_name: str):
     normalized = str(scaler_name or "robust").strip().lower()
     if normalized == "robust":
@@ -73,11 +82,29 @@ def _resolve_scaler(scaler_name: str):
     )
 
 
+def _normalize_clip_range(
+    clip_range: Sequence[float] | None,
+) -> tuple[float, float] | None:
+    if clip_range is None:
+        return None
+    if isinstance(clip_range, (str, bytes)) or len(clip_range) != 2:
+        raise ValueError("preprocess clipping requires exactly two bounds: min and max.")
+    try:
+        lower, upper = (float(value) for value in clip_range)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("preprocess clipping bounds must be numeric.") from exc
+    if not np.isfinite(lower) or not np.isfinite(upper):
+        raise ValueError("preprocess clipping bounds must be finite.")
+    if lower >= upper:
+        raise ValueError("preprocess clipping requires min < max.")
+    return lower, upper
+
+
 def preprocess_data(
     X: pd.DataFrame,
     variance_threshold: float = 0.8 * (1 - 0.8),
     corr_threshold: float = 0.95,
-    clip_range: tuple = (-1e10, 1e10),
+    clip_range: tuple[float, float] | None = None,
     scaler: str = "robust",
     allow_full_fit: bool = False,
 ):
@@ -112,12 +139,11 @@ def preprocess_data(
         logging.info(f"Data reduced to {X_final.shape[1]} features after removing highly correlated features.")
         logging.info(f"Data shape after preprocessing: {X_final.shape}")
         
-        # Clip extreme values to a safe range for float32 conversion.
-        # This ensures that when the model or pandas casts the data to float32,
-        # the values do not exceed the representable limits.
-        min_threshold, max_threshold = clip_range  # Adjust these thresholds based on your data's expected range.
-        X_final = X_final.clip(lower=min_threshold, upper=max_threshold)
-        logging.info(f"Data clipped to range [{min_threshold}, {max_threshold}].")
+        normalized_clip = _normalize_clip_range(clip_range)
+        if normalized_clip is not None:
+            min_threshold, max_threshold = normalized_clip
+            X_final = X_final.clip(lower=min_threshold, upper=max_threshold)
+            logging.info(f"Data clipped to range [{min_threshold}, {max_threshold}].")
         logging.info(f"Final data range: min={X_final.min().min()}, max={X_final.max().max()}")
 
         return X_final
@@ -128,9 +154,9 @@ def preprocess_data(
 
 def fit_preprocessor(
     X_train: pd.DataFrame,
-    variance_threshold: float,
+    variance_threshold: float | None,
     corr_threshold: float,
-    clip_range: tuple,
+    clip_range: Sequence[float] | None,
     scaler: str = "robust",
 ) -> Dict[str, Any]:
     """Fit preprocessing steps on training data only."""
@@ -138,14 +164,21 @@ def fit_preprocessor(
     X_scaled = scaler_obj.fit_transform(X_train)
     X_scaled_df = pd.DataFrame(X_scaled, columns=X_train.columns)
 
-    selector = VarianceThreshold(threshold=variance_threshold)
-    X_reduced = selector.fit_transform(X_scaled_df)
-    features_after_variance = X_scaled_df.columns[selector.get_support(indices=True)]
+    if variance_threshold is None:
+        selector = _IdentitySelector()
+        X_reduced = selector.fit_transform(X_scaled_df)
+        features_after_variance = X_scaled_df.columns
+    else:
+        selector = VarianceThreshold(threshold=variance_threshold)
+        X_reduced = selector.fit_transform(X_scaled_df)
+        features_after_variance = X_scaled_df.columns[selector.get_support(indices=True)]
     X_reduced_df = pd.DataFrame(X_reduced, columns=features_after_variance)
 
     corr_matrix = X_reduced_df.corr().abs()
     upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
     to_drop = [column for column in upper.columns if any(upper[column] > corr_threshold)]
+
+    normalized_clip = _normalize_clip_range(clip_range)
 
     return {
         "scaler": scaler_obj,
@@ -153,7 +186,7 @@ def fit_preprocessor(
         "selector": selector,
         "variance_features": list(features_after_variance),
         "corr_drop": to_drop,
-        "clip_range": clip_range,
+        "clip_range": normalized_clip,
     }
 
 
@@ -163,7 +196,7 @@ def transform_preprocessor(X: pd.DataFrame, preprocessor: Dict[str, Any]) -> pd.
     selector = preprocessor["selector"]
     variance_features = preprocessor["variance_features"]
     to_drop = preprocessor["corr_drop"]
-    clip_range = preprocessor["clip_range"]
+    clip_range = preprocessor.get("clip_range")
 
     X_scaled = scaler.transform(X)
     X_scaled_df = pd.DataFrame(X_scaled, columns=X.columns)
@@ -173,8 +206,9 @@ def transform_preprocessor(X: pd.DataFrame, preprocessor: Dict[str, Any]) -> pd.
 
     X_final = X_reduced_df.drop(columns=to_drop)
 
-    min_threshold, max_threshold = clip_range
-    X_final = X_final.clip(lower=min_threshold, upper=max_threshold)
+    if clip_range is not None:
+        min_threshold, max_threshold = _normalize_clip_range(clip_range)
+        X_final = X_final.clip(lower=min_threshold, upper=max_threshold)
     return X_final
 
 # ── 3) Stable feature selection ────────────────────────────────────────────────

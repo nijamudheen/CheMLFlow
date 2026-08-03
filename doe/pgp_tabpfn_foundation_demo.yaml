@@ -1,0 +1,62 @@
+version: 1
+
+# Focused extension of the PGP dashboard demo that reproduces the molecular
+# representation and preprocessing choices used by the TabPFN molecular-
+# property study: TabPFN-2.6 over RDKit2D or frozen CheMeleon fingerprints.
+dataset:
+  profile: clf_local_csv
+  name: pgp_broccatelli_tabpfn_foundation_demo
+  task_type: classification
+  target_column: Activity
+  source:
+    type: local_csv
+    path: tutorials/data/pgp_broccatelli.csv
+  smiles_column: SMILES
+  sample:
+    fraction: 0.25
+    seed: 42
+    strategy: stratified
+
+defaults:
+  global.base_dir: artifacts/data/pgp_tabpfn_foundation_demo
+  global.random_state: 42
+  global.runs.enabled: true
+  global.artifact_retention: full
+  split.mode: cv
+  split.strategy: random
+  split.cv.n_splits: 3
+  split.cv.repeats: 1
+  split.val_from_train.val_size: 0.15
+  split.require_disjoint: true
+  split.require_full_test_coverage: true
+  pipeline.preprocess: true
+  pipeline.select: false
+  pipeline.explain: false
+  preprocess.scaler: standard
+  preprocess.variance_threshold: null
+  preprocess.corr_threshold: 1.0
+  preprocess.clip.min: -6
+  preprocess.clip.max: 6
+  featurize.checkpoint: models/chemeleon_mp.pt
+  featurize.batch_size: 64
+  featurize.device: auto
+  train.model.type: tabpfn
+  train.model.params.model_version: "2.6"
+  train.model.params.n_estimators: 8
+  train.model.params.ignore_pretraining_limits: true
+  train.tuning.method: fixed
+  train.reporting.plot_split_performance: true
+
+search_space:
+  pipeline.feature_input: [featurize.rdkit, featurize.chemeleon_fp]
+
+constraints:
+  isolate_case_artifacts: true
+  max_cases: 6
+
+selection:
+  primary_metric: auc
+  optimize: max
+
+output:
+  dir: config/generated/pgp_tabpfn_foundation_demo

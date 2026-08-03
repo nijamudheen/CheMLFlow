@@ -62,6 +62,7 @@ from MLModels import data_preprocessing
 from MLModels import train_models
 from utilities import splitters
 from utilities.config_validation import validate_config_strict
+from utilities.run_progress import RunProgressReporter
 
 _EXPLICIT_FEATURE_INPUT_NODES = {
     "featurize.none",
@@ -70,6 +71,7 @@ _EXPLICIT_FEATURE_INPUT_NODES = {
     "featurize.rdkit_labeled",
     "featurize.morgan",
     "featurize.ecfp4_rdkit",
+    "featurize.chemeleon_fp",
 }
 
 
@@ -92,6 +94,9 @@ def build_paths(base_dir: str) -> dict[str, str]:
         "ecfp4_rdkit_features": os.path.join(base_dir, "ecfp4_rdkit_features.csv"),
         "ecfp4_rdkit_labeled": os.path.join(base_dir, "ecfp4_rdkit_labeled.csv"),
         "ecfp4_rdkit_meta": os.path.join(base_dir, "ecfp4_rdkit_meta.json"),
+        "chemeleon_fingerprints": os.path.join(base_dir, "chemeleon_fingerprints.csv"),
+        "chemeleon_labeled": os.path.join(base_dir, "chemeleon_fingerprints_labeled.csv"),
+        "chemeleon_meta": os.path.join(base_dir, "chemeleon_fingerprints_meta.json"),
         "preprocessed_features": os.path.join(base_dir, "preprocessed_features.csv"),
         "preprocessed_labels": os.path.join(base_dir, "preprocessed_labels.csv"),
         "selected_features": os.path.join(base_dir, "selected_features.csv"),
@@ -1037,6 +1042,65 @@ def run_node_featurize_ecfp4_rdkit(context: dict) -> None:
     context["feature_method"] = "ecfp4_rdkit"
 
 
+def run_node_featurize_chemeleon_fp(context: dict) -> None:
+    input_file = context.get("curated_path", context["paths"]["curated"])
+    validate_contract(
+        bind_output_path(FEATURIZE_MORGAN_INPUT_CONTRACT, input_file),
+        warn_only=False,
+    )
+    featurize_config = context.get("featurize_config", {}) or {}
+    checkpoint = str(featurize_config.get("checkpoint", "")).strip()
+    if not checkpoint:
+        raise ValueError(
+            "featurize.chemeleon_fp requires featurize.checkpoint to point to "
+            "an existing chemeleon_mp.pt file."
+        )
+    batch_size = int(featurize_config.get("batch_size", 64))
+    if batch_size <= 0:
+        raise ValueError("featurize.batch_size must be a positive integer.")
+    device = str(featurize_config.get("device", "auto")).strip() or "auto"
+    output_file = context["paths"]["chemeleon_fingerprints"]
+    labeled_output = context["paths"]["chemeleon_labeled"]
+    metadata_output = context["paths"]["chemeleon_meta"]
+    _track_heavy_artifact(context, output_file)
+    _track_heavy_artifact(context, labeled_output)
+    _run_subprocess(
+        [
+            sys.executable,
+            os.path.join("GenDescriptors", "CheMeleon_fingerprints.py"),
+            input_file,
+            output_file,
+            "--labeled-output-file",
+            labeled_output,
+            "--metadata-output-file",
+            metadata_output,
+            "--checkpoint",
+            checkpoint,
+            "--property-columns",
+            context["target_column"],
+            "--batch-size",
+            str(batch_size),
+            "--device",
+            device,
+        ]
+    )
+    validate_contract(
+        bind_output_path(FEATURIZE_MORGAN_OUTPUT_CONTRACT, output_file),
+        warn_only=True,
+    )
+    validate_contract(
+        make_target_column_contract(
+            name="featurize_chemeleon_fp_labeled_output",
+            target_column=context["target_column"],
+            output_path=labeled_output,
+        ),
+        warn_only=True,
+    )
+    context["feature_matrix"] = labeled_output
+    context["labels_matrix"] = labeled_output
+    context["feature_method"] = "chemeleon_fp"
+
+
 def run_node_label_normalize(context: dict) -> None:
     label_config = context.get("label_config", {})
     source_column = label_config.get("source_column")
@@ -1101,9 +1165,12 @@ def _resolve_feature_method(context: dict) -> str | None:
         return "smiles_native"
     if pipeline_feature_input == "featurize.ecfp4_rdkit":
         return "ecfp4_rdkit"
+    if pipeline_feature_input == "featurize.chemeleon_fp":
+        return "chemeleon_fp"
 
     pipeline_nodes = [str(node).strip().lower() for node in (context.get("pipeline_nodes") or [])]
     for candidate in (
+        "featurize.chemeleon_fp",
         "featurize.ecfp4_rdkit",
         "featurize.morgan",
         "featurize.rdkit_labeled",
@@ -1114,6 +1181,8 @@ def _resolve_feature_method(context: dict) -> str | None:
             return candidate.split(".", 1)[1]
 
     feature_matrix = str(context.get("feature_matrix", "")).strip().lower()
+    if "chemeleon" in feature_matrix:
+        return "chemeleon_fp"
     if "ecfp4_rdkit" in feature_matrix:
         return "ecfp4_rdkit"
     if "morgan" in feature_matrix:
@@ -1329,6 +1398,7 @@ def run_node_split(context: dict) -> None:
         "featurize.rdkit_labeled",
         "featurize.morgan",
         "featurize.ecfp4_rdkit",
+        "featurize.chemeleon_fp",
     }
     pipeline_nodes = list(context.get("pipeline_nodes") or [])
     explicit_feature_input_before_split = False
@@ -1919,7 +1989,7 @@ def _resolve_feature_inputs(
             f"{consumer} requires an explicit feature input node in pipeline.nodes "
             "("
             "featurize.none/featurize.rdkit/featurize.rdkit_labeled/"
-            "featurize.morgan/featurize.ecfp4_rdkit"
+            "featurize.morgan/featurize.ecfp4_rdkit/featurize.chemeleon_fp"
             ")."
         )
     pipeline_type = context.get("pipeline_type", "chembl")
@@ -1928,13 +1998,25 @@ def _resolve_feature_inputs(
     return context["paths"]["rdkit_descriptors"], context["paths"]["pic50_3class"]
 
 
-def _preprocess_params(context: dict) -> tuple[float, float, tuple[float, float], str, int, int]:
+def _preprocess_params(
+    context: dict,
+) -> tuple[float | None, float, tuple[float, float] | None, str, int, int]:
     preprocess_config = context.get("preprocess_config", {})
     variance_threshold = preprocess_config.get("variance_threshold", 0.8 * (1 - 0.8))
     corr_threshold = preprocess_config.get("corr_threshold", 0.95)
-    clip_range = preprocess_config.get("clip_range", (-1e10, 1e10))
-    if isinstance(clip_range, list):
-        clip_range = tuple(clip_range)
+    if "clip" in preprocess_config:
+        clip_config = preprocess_config.get("clip")
+        if not isinstance(clip_config, dict):
+            raise ValueError("preprocess.clip must be a mapping with numeric min and max values.")
+        if set(clip_config) != {"min", "max"}:
+            raise ValueError("preprocess.clip must contain exactly the keys 'min' and 'max'.")
+        try:
+            clip_range = (float(clip_config["min"]), float(clip_config["max"]))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("preprocess.clip min and max must be numeric.") from exc
+    else:
+        legacy_clip_range = preprocess_config.get("clip_range")
+        clip_range = tuple(legacy_clip_range) if isinstance(legacy_clip_range, list) else legacy_clip_range
     scaler = str(preprocess_config.get("scaler", "robust")).strip().lower() or "robust"
     stable_k = preprocess_config.get("stable_features_k", 50)
     random_state = _resolve_seed(
@@ -2498,6 +2580,7 @@ def run_node_train_tdc(context: dict) -> None:
                 model_config=model_config,
                 X_val=X_val,
                 y_val=y_val,
+                progress_reporter=context.get("progress_reporter"),
             )
             _track_heavy_artifact(context, train_result.model_path)
             _track_heavy_artifact_glob(
@@ -2649,6 +2732,7 @@ def run_node_train(context: dict) -> None:
             random_state=train_random_state,
             task_type=task_type,
             model_config=chemprop_model_config,
+            progress_reporter=context.get("progress_reporter"),
         )
         context["trained_model_path"] = train_result.model_path
         _track_heavy_artifact(context, train_result.model_path)
@@ -2748,6 +2832,8 @@ def run_node_train(context: dict) -> None:
         expected_model_path = os.path.join(output_dir, f"{model_type}_best_model.cbm")
     elif str(model_type).startswith("dl_"):
         expected_model_path = os.path.join(output_dir, f"{model_type}_best_model.pth")
+    elif model_type == "tabpfn":
+        expected_model_path = os.path.join(output_dir, f"{model_type}_best_model.tabpfn_fit")
     else:
         expected_model_path = os.path.join(output_dir, f"{model_type}_best_model.pkl")
     _track_heavy_artifact(context, expected_model_path)
@@ -2769,6 +2855,7 @@ def run_node_train(context: dict) -> None:
         model_config=train_model_config,
         X_val=X_val,
         y_val=y_val,
+        progress_reporter=context.get("progress_reporter"),
     )
     context["trained_model_path"] = train_result.model_path
     _track_heavy_artifact(context, train_result.model_path)
@@ -2823,6 +2910,8 @@ def run_node_explain(context: dict) -> None:
             model_path = os.path.join(output_dir, f"{model_type}_best_model.pth")
         elif model_type == "catboost_classifier":
             model_path = os.path.join(output_dir, f"{model_type}_best_model.cbm")
+        elif model_type == "tabpfn":
+            model_path = os.path.join(output_dir, f"{model_type}_best_model.tabpfn_fit")
         else:
             model_path = os.path.join(output_dir, f"{model_type}_best_model.pkl")
 
@@ -2957,6 +3046,7 @@ def run_node_train_timeseries(context: dict) -> None:
         train_block=train_config,
         split_block=split_block,
         global_random_state=int(train_random_state),
+        progress_reporter=context.get("progress_reporter"),
     )
     context["trained_model_path"] = train_result.model_path
     _track_heavy_artifact(context, train_result.model_path)
@@ -2982,6 +3072,7 @@ NODE_REGISTRY = {
     "featurize.rdkit_labeled": run_node_featurize_rdkit_labeled,
     "featurize.morgan": run_node_featurize_morgan,
     "featurize.ecfp4_rdkit": run_node_featurize_ecfp4_rdkit,
+    "featurize.chemeleon_fp": run_node_featurize_chemeleon_fp,
     "preprocess.features": run_node_preprocess_features,
     "select.features": run_node_select_features,
     "train": run_node_train,
@@ -3006,6 +3097,7 @@ _SPLIT_MUST_FOLLOW = {
     "featurize.rdkit_labeled",
     "featurize.morgan",
     "featurize.ecfp4_rdkit",
+    "featurize.chemeleon_fp",
 }
 
 
@@ -3065,6 +3157,8 @@ def validate_pipeline_nodes(nodes: list[str]) -> None:
             "featurize.morgan",
             "featurize.rdkit",
             "featurize.rdkit_labeled",
+            "featurize.ecfp4_rdkit",
+            "featurize.chemeleon_fp",
             "featurize.none",
             "label.normalize",
             "label.ic50",
@@ -3202,6 +3296,13 @@ def run_configured_pipeline_nodes(config: dict, config_path: str) -> bool:
         },
     )
 
+    progress_reporter = RunProgressReporter(
+        run_dir,
+        config_path=config_path,
+        pipeline_nodes=nodes,
+    ).start()
+    context["progress_reporter"] = progress_reporter
+
     failed_node = None
     try:
         for node_name in nodes:
@@ -3209,7 +3310,9 @@ def run_configured_pipeline_nodes(config: dict, config_path: str) -> bool:
             node_fn = NODE_REGISTRY.get(node_name)
             if not node_fn:
                 raise ValueError(f"Unknown pipeline node: {node_name}")
+            progress_reporter.node_started(node_name)
             node_fn(context)
+            progress_reporter.node_completed(node_name)
     except BaseException as exc:
         _apply_artifact_retention(context, run_status="failed")
         artifact_retention_summary = context.get("artifact_retention_summary")
@@ -3234,6 +3337,11 @@ def run_configured_pipeline_nodes(config: dict, config_path: str) -> bool:
                 "artifact_retention_summary": artifact_retention_summary,
             },
         )
+        progress_reporter.failed(
+            exception_type=type(exc).__name__,
+            message=str(exc),
+            failed_node=failed_node,
+        )
         raise
 
     _apply_artifact_retention(context, run_status="success")
@@ -3255,6 +3363,7 @@ def run_configured_pipeline_nodes(config: dict, config_path: str) -> bool:
             "artifact_retention_summary": artifact_retention_summary,
         },
     )
+    progress_reporter.success()
     return True
 
 

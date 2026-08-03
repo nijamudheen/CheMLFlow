@@ -60,7 +60,9 @@ train:
 ## Installation
 
 See [docs/installation.md](docs/installation.md) for the recommended conda-based source install,
-developer install, optional deep-learning dependencies, and TDC dataset support.
+developer install, foundation-model dependencies, and TDC dataset support. CheMLFlow uses one
+`chemlflow_env`; supported model backends are installed into that environment rather than into
+one environment per model.
 
 ## Quickstart
 
@@ -498,3 +500,66 @@ Under the run directory (e.g., `runs/<timestamp>/`):
 - `chemprop_best_params.pkl` (do not load untrusted pickle/joblib files)
 - `chemprop_metrics.json` (classification: `auc`/`auprc`/`accuracy`/`f1`; regression: `r2`/`mae`; plus Chemprop/foundation run settings)
 - `chemprop_predictions.csv` (`y_true` + `y_pred`; classification also includes `y_proba`)
+
+## TabPFN 2.6 with fixed molecular representations (optional; classification)
+
+CheMLFlow supports the paper-aligned TabPFN 2.6 classifier through
+`train.model.type: tabpfn`. It is an optional backend and is deliberately pinned
+to model version 2.6; CheMLFlow will not silently fall back to 2.5 or the newer
+TabPFN 3 default.
+
+The new `featurize.chemeleon_fp` node loads an explicit local
+`chemeleon_mp.pt`, freezes the encoder, mean-pools each molecular graph, and
+writes one 2,048-dimensional fingerprint per molecule. `featurize.rdkit`
+provides the alternative RDKit2D representation.
+
+### One-time environment and weight setup
+
+Install the complete foundation-model stack into the same global CheMLFlow
+environment used by the rest of the application. On Intel macOS, install
+PyTorch 2.5.1 from conda-forge first because PyPI does not publish a compatible
+wheel for this platform:
+
+```bash
+conda activate chemlflow_env
+# Intel macOS only:
+conda install -c conda-forge pytorch=2.5.1
+
+python -m pip install -e ".[chemprop,tabpfn,molecular_eda]"
+```
+
+There are two independent weight requirements:
+
+| DOE branch | CheMeleon `chemeleon_mp.pt` | Cached TabPFN 2.6 weights |
+|---|---:|---:|
+| RDKit2D + TabPFN | No | Yes |
+| CheMeleonFP + another tabular model | Yes | No |
+| CheMeleonFP + TabPFN | Yes | Yes |
+
+Download the open CheMeleon checkpoint using the command in
+[CheMeleon foundation checkpoint](#chemeleon-foundation-checkpoint). TabPFN's
+weights are not stored in this repository or bundled by `pip`: review the
+TabPFN 2.6 model license at https://huggingface.co/Prior-Labs/tabpfn_2_6, then
+run the one-time cache-priming command in
+[the installation guide](docs/installation.md#full-foundation-model-installation-in-the-same-environment).
+If Hugging Face requests authentication, use `hf auth login`; headless hosts can
+instead provide `HF_TOKEN`. Never commit that token.
+
+For the tracked PGP comparison:
+
+```bash
+python scripts/generate_doe.py --doe doe/pgp_tabpfn_foundation_demo.yaml
+python -m chemlflow_dashboard run \
+  --doe doe/pgp_tabpfn_foundation_demo.yaml \
+  --max-workers 1
+```
+
+The DOE fits standardization on each training fold and then clips transformed
+features to `[-6, 6]`. If `preprocess.clip` is absent in another config, no
+clipping occurs. TabPFN model artifacts use the official `.tabpfn_fit` format.
+
+The full six-job DOE therefore needs both `models/chemeleon_mp.pt` and the cached
+TabPFN 2.6 classifier checkpoint. The classifier checkpoint is approximately
+43 MB; the separate 51.6 MB regressor checkpoint is not needed for this
+classification DOE. Intel macOS runs the backend CPU-only through conda-forge's
+PyTorch build, so the full DOE will be materially slower than on a CUDA host.

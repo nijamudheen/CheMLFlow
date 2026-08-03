@@ -13,6 +13,7 @@ def load_model(
     initialize_model: Callable[..., Any],
     load_pickle: Callable[[str], Any],
 ) -> object:
+    model_type = str(model_type).strip().lower()
     is_dl = is_dl_model(model_type)
 
     if is_dl:
@@ -47,4 +48,12 @@ def load_model(
         model = CatBoostClassifier()
         model.load_model(model_path)
         return model
+    if model_type == "tabpfn":
+        try:
+            from tabpfn import TabPFNClassifier
+        except ImportError as exc:
+            raise ImportError(
+                "Loading a TabPFN artifact requires the optional TabPFN dependency."
+            ) from exc
+        return TabPFNClassifier.load_from_fit_state(model_path, device="cpu")
     return load_pickle(model_path)

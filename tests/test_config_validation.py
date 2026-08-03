@@ -303,6 +303,44 @@ def test_strict_rejects_invalid_preprocess_scaler() -> None:
     assert "CFG_PREPROCESS_SCALER_INVALID" in codes
 
 
+def test_strict_allows_explicit_preprocess_clip_mapping() -> None:
+    nodes = ["split", "featurize.rdkit", "preprocess.features", "train"]
+    cfg = _base_config(nodes)
+    cfg["split"] = {"strategy": "random"}
+    cfg["preprocess"] = {
+        "scaler": "standard",
+        "clip": {"min": -6, "max": 6},
+    }
+    cfg["train"] = {"model": {"type": "random_forest"}}
+
+    issues = collect_config_issues(cfg, nodes)
+
+    assert not any(issue.code == "CFG_PREPROCESS_CLIP_INVALID" for issue in issues)
+
+
+@pytest.mark.parametrize(
+    "clip",
+    [
+        [-6, 6],
+        {"min": -6},
+        {"min": -6, "max": 6, "unexpected": 1},
+        {"min": 6, "max": -6},
+        {"min": "negative", "max": 6},
+        {"min": float("-inf"), "max": 6},
+    ],
+)
+def test_strict_rejects_invalid_preprocess_clip(clip: object) -> None:
+    nodes = ["split", "featurize.rdkit", "preprocess.features", "train"]
+    cfg = _base_config(nodes)
+    cfg["split"] = {"strategy": "random"}
+    cfg["preprocess"] = {"scaler": "standard", "clip": clip}
+    cfg["train"] = {"model": {"type": "random_forest"}}
+
+    issues = collect_config_issues(cfg, nodes)
+
+    assert any(issue.code == "CFG_PREPROCESS_CLIP_INVALID" for issue in issues)
+
+
 def test_strict_rejects_chemprop_with_explicit_tabular_featurizer() -> None:
     cfg = _base_config(["split", "featurize.rdkit", "preprocess.features", "train"])
     cfg["pipeline"]["feature_input"] = "smiles_native"
@@ -445,6 +483,51 @@ def test_strict_allows_ecfp4_rdkit_as_local_csv_feature_branch() -> None:
     assert "CFG_FEATURE_INPUT_NOT_SUPPORTED" not in codes
     assert "CFG_FEATURE_INPUT_NODE_REQUIRED" not in codes
     assert "CFG_PIPELINE_FEATURE_INPUT_MISMATCH" not in codes
+
+
+def test_strict_requires_chemeleon_fp_checkpoint() -> None:
+    nodes = ["get_data", "curate", "featurize.chemeleon_fp", "split", "train"]
+    cfg = _base_config(nodes)
+    cfg["global"]["task_type"] = "classification"
+    cfg["global"]["target_column"] = "label"
+    cfg["pipeline"]["feature_input"] = "featurize.chemeleon_fp"
+    cfg["get_data"] = {"data_source": "local_csv", "source": {"path": "data.csv"}}
+    cfg["curate"] = {"smiles_column": "SMILES", "properties": "label"}
+    cfg["split"] = {"strategy": "random"}
+    cfg["train"] = {"model": {"type": "tabpfn"}}
+
+    issues = collect_config_issues(cfg, nodes)
+
+    assert any(issue.code == "CFG_CHEMELEON_FP_CHECKPOINT_REQUIRED" for issue in issues)
+
+
+def test_strict_allows_tabpfn_with_chemeleon_fp_and_clipped_standardization() -> None:
+    nodes = [
+        "get_data",
+        "curate",
+        "featurize.chemeleon_fp",
+        "split",
+        "preprocess.features",
+        "train",
+    ]
+    cfg = _base_config(nodes)
+    cfg["global"]["task_type"] = "classification"
+    cfg["global"]["target_column"] = "label"
+    cfg["pipeline"]["feature_input"] = "featurize.chemeleon_fp"
+    cfg["get_data"] = {"data_source": "local_csv", "source": {"path": "data.csv"}}
+    cfg["curate"] = {"smiles_column": "SMILES", "properties": "label"}
+    cfg["featurize"] = {"checkpoint": "models/chemeleon_mp.pt"}
+    cfg["split"] = {"strategy": "random"}
+    cfg["preprocess"] = {"scaler": "standard", "clip": {"min": -6, "max": 6}}
+    cfg["train"] = {"model": {"type": "tabpfn"}}
+
+    issues = collect_config_issues(cfg, nodes)
+    codes = {issue.code for issue in issues}
+
+    assert "CFG_CHEMELEON_FP_CHECKPOINT_REQUIRED" not in codes
+    assert "CFG_FEATURE_INPUT_NOT_SUPPORTED" not in codes
+    assert "CFG_MODEL_NOT_SUPPORTED_FOR_PROFILE" not in codes
+    assert "CFG_MODEL_TASK_MISMATCH" not in codes
 
 
 def test_strict_rejects_tdc_split_profile_shape() -> None:

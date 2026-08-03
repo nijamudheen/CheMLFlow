@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="color-scheme" content="light">
+    <title>CheMLFlow Agent Mission Control</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar" aria-label="Dashboard navigation">
+        <div class="brand">
+          <strong>CheMLFlow</strong>
+          <small>Agent mission control</small>
+        </div>
+
+        <div class="side-group">
+          <div class="side-label" id="sideCollectionLabel">Studies</div>
+          <div class="study-item active" id="studyItem">
+            <div class="study-item-top">
+              <strong id="sideStudyName">Loading…</strong>
+              <span class="study-status idle" id="sideStudyStatus">—</span>
+            </div>
+            <small id="sideStudySub">reading artifacts…</small>
+          </div>
+        </div>
+
+        <div class="side-foot">
+          <div id="sourcePrimary">reads run_status.json</div>
+          <div id="sourceSecondary">+ execution_manifest.jsonl</div>
+          <div class="poll" id="pollState">connecting…</div>
+        </div>
+      </aside>
+
+      <main class="main" id="mission">
+        <header class="topbar">
+          <div class="topbar-title">
+            <div class="eyebrow" id="studyKicker">Local study · artifact stream</div>
+            <h1 id="studyName">CheMLFlow study</h1>
+            <div class="config-path" id="configPath">—</div>
+          </div>
+          <div class="topbar-right">
+            <div class="elapsed">
+              <div class="eyebrow">Elapsed</div>
+              <strong id="elapsedLabel">—</strong>
+            </div>
+            <div class="status-pill idle" id="statusPill">
+              <i aria-hidden="true"></i>
+              <span id="statusLabel">LOADING</span>
+            </div>
+            <div class="topbar-actions">
+              <button class="btn btn-secondary" id="pauseButton" type="button" disabled>Pause agent</button>
+              <button class="btn btn-primary" id="traceButton" type="button">Agent trace</button>
+            </div>
+          </div>
+        </header>
+
+        <div class="content">
+          <section class="section" id="status">
+            <div class="section-head">
+              <span class="section-index">01</span>
+              <div class="section-title">
+                <h2>Run status</h2>
+                <p id="statusNote">Progress, best result, and health.</p>
+              </div>
+            </div>
+
+          <div class="kpi-grid">
+            <div class="card blueprint kpi">
+              <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+              <div class="card-kicker">Progress</div>
+              <div class="kpi-main">
+                <strong id="doneCount">0</strong>
+                <span id="totalCount">/ 0 cases</span>
+              </div>
+              <div class="kpi-bar">
+                <i class="done" id="barDone"></i>
+                <i class="bad" id="barFailed"></i>
+              </div>
+              <div class="kpi-sub" id="progressSub">—</div>
+            </div>
+
+            <div class="card blueprint kpi">
+              <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+              <div class="card-kicker" id="bestKicker">Best metric</div>
+              <div class="kpi-main">
+                <strong id="bestMetric">—</strong>
+                <span class="delta" id="bestDelta"></span>
+              </div>
+              <div class="kpi-line" id="bestModel">No complete result</div>
+              <div class="kpi-sub" id="bestSub">—</div>
+            </div>
+
+            <button class="card blueprint kpi clickable" id="failedTile" type="button">
+              <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+              <div class="card-kicker">Failed / skipped</div>
+              <div class="kpi-main">
+                <strong id="failedCount">0</strong>
+                <span id="skippedCount">+ 0 skipped</span>
+              </div>
+              <div class="kpi-line" id="failReason">No failures observed</div>
+              <div class="kpi-link">Filter the table →</div>
+            </button>
+
+            <div class="card blueprint kpi">
+              <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+              <div class="card-kicker">Observed compute</div>
+              <div class="kpi-main">
+                <strong id="wallValue">—</strong>
+                <span id="wallUnit">wall</span>
+              </div>
+              <div class="kpi-line" id="workerLine">0 active local workers</div>
+              <div class="kpi-sub" id="computeNote">CPU/GPU utilization is not emitted by v1 telemetry.</div>
+            </div>
+
+            <button class="card blueprint kpi clickable" id="decisionTile" type="button">
+              <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+              <div class="card-kicker">Agent decisions</div>
+              <div class="kpi-main">
+                <strong id="decisionCount">0</strong>
+                <span>logged</span>
+              </div>
+              <div class="kpi-line" id="decisionLine">no decisions recorded</div>
+              <div class="kpi-link">Open reasoning drawer →</div>
+            </button>
+          </div>
+
+          <div class="blueprint proposal hidden" id="proposalCard">
+            <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+            <div class="proposal-main">
+              <div class="proposal-top">
+                <span class="tag tag-running" id="proposalTag">awaiting approval</span>
+                <span class="meta" id="proposalMeta">—</span>
+              </div>
+              <h3 id="proposalTitle">—</h3>
+              <p class="proposal-rationale" id="proposalRationale">—</p>
+              <div class="evidence" id="proposalEvidence"></div>
+            </div>
+            <div class="proposal-side">
+              <div class="eyebrow">Estimated cost</div>
+              <strong id="proposalCost">—</strong>
+              <p id="proposalExpect">—</p>
+              <div class="proposal-actions">
+                <button class="btn btn-primary" id="approveButton" type="button">Approve</button>
+                <button class="btn btn-secondary" id="whyButton" type="button">Why?</button>
+              </div>
+            </div>
+          </div>
+          </section>
+
+          <section class="section" id="results">
+            <div class="section-head">
+              <span class="section-index">02</span>
+              <div class="section-title">
+                <h2>Results</h2>
+                <p id="resultsNote">Mean performance and per-fold outcomes.</p>
+              </div>
+            </div>
+
+            <div class="stack">
+              <div class="card blueprint comparison-card" id="comparisonCard">
+                <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+                <div class="comparison-head">
+                  <div class="card-kicker" id="comparisonKicker">Candidate comparison — mean metric and fold outcomes</div>
+                  <div class="ref" id="comparisonRef"></div>
+                </div>
+                <div class="comparison-columns" aria-hidden="true">
+                  <span>Candidate</span>
+                  <span>Fold outcomes</span>
+                  <span id="comparisonMetricHeader">Mean metric</span>
+                </div>
+                <div class="comparison-rows" id="comparisonRows"></div>
+                <div class="legend" id="comparisonLegend"></div>
+                <div class="empty-state tight hidden" id="comparisonEmpty">No candidate/fold groups are available.</div>
+              </div>
+            </div>
+          </section>
+
+          <section class="section" id="executions">
+            <div class="section-head">
+              <span class="section-index">03</span>
+              <div class="section-title">
+                <h2>Executions</h2>
+                <p id="executionsNote">Every valid case, filterable and sortable.</p>
+              </div>
+            </div>
+
+            <div class="stack">
+              <div class="card blueprint table-card" id="cases">
+                <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+                <div class="table-head">
+                  <h3 id="casesTitle">Execution cases</h3>
+                  <div class="chips" id="filterChips"></div>
+                </div>
+                <div class="row-grid table-cols">
+                  <button class="sortable" type="button" data-sort="case_id"><span id="caseHeader">Case</span> <span data-arrow="case_id"></span></button>
+                  <div>Model</div>
+                  <div class="h-feat">Input</div>
+                  <div class="h-fold">Fold</div>
+                  <div class="h-rep">Repeat</div>
+                  <div>Status</div>
+                  <button class="sortable num" type="button" data-sort="metric_value"><span id="metricHeader">Metric</span> <span data-arrow="metric_value"></span></button>
+                  <button class="sortable num" type="button" data-sort="elapsed_seconds">Runtime <span data-arrow="elapsed_seconds"></span></button>
+                  <div></div>
+                </div>
+                <div class="table-body" id="executionRows"></div>
+                <div class="empty-state hidden" id="executionEmpty">No cases match this filter.</div>
+              </div>
+
+              <div class="card blueprint side-card">
+                <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+                <div class="card-kicker">Where the wall time went</div>
+                <div class="bars" id="computeBars"></div>
+                <div class="empty-state tight hidden" id="computeEmpty">No case has reported elapsed time yet.</div>
+              </div>
+            </div>
+          </section>
+
+          <section class="section" id="integrity">
+            <div class="section-head">
+              <span class="section-index">04</span>
+              <div class="section-title">
+                <h2>Data integrity</h2>
+                <p id="integrityNote">Split construction and compatibility checks.</p>
+              </div>
+            </div>
+
+            <div class="pair">
+              <div class="card blueprint side-card">
+                <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+                <div class="card-kicker" id="splitKicker">Split integrity</div>
+                <div class="checks" id="integrityChecks"></div>
+              </div>
+
+              <div class="card blueprint side-card" id="skipCard">
+                <i class="corner tl"></i><i class="corner tr"></i><i class="corner bl"></i><i class="corner br"></i>
+                <div class="card-kicker">Compatibility audit</div>
+                <div class="skips" id="skipReasons"></div>
+                <div class="empty-state tight hidden" id="skipEmpty">No compatibility skips recorded.</div>
+              </div>
+            </div>
+          </section>
+        </div>
+      </main>
+    </div>
+
+    <div class="drawer-root hidden" id="traceRoot">
+      <button class="drawer-scrim" id="traceScrim" type="button" aria-label="Close reasoning trail"></button>
+      <div class="drawer" role="dialog" aria-label="Reasoning trail">
+        <div class="drawer-head">
+          <div>
+            <div class="kicker">Reasoning trail</div>
+            <h2>Why the agent did that</h2>
+          </div>
+          <button class="btn btn-secondary btn-icon" id="traceClose" type="button" aria-label="Close">×</button>
+        </div>
+        <div class="drawer-tabs">
+          <button class="drawer-tab active" id="tabDecisions" type="button">Decisions</button>
+          <button class="drawer-tab" id="tabLog" type="button">Activity log</button>
+        </div>
+        <div class="drawer-body" id="tracePanelDecisions"></div>
+        <div class="drawer-body log-body hidden" id="tracePanelLog"></div>
+      </div>
+    </div>
+
+    <div class="drawer-root case-root hidden" id="caseRoot">
+      <button class="drawer-scrim" id="caseScrim" type="button" aria-label="Close case details"></button>
+      <div class="drawer case-drawer" role="dialog" aria-label="Case details">
+        <div class="drawer-head bordered">
+          <div class="case-ident">
+            <div class="case-ident-top">
+              <span class="id" id="caseId">—</span>
+              <span class="tag tag-queued" id="caseStatus">—</span>
+            </div>
+            <h2 id="caseModel">—</h2>
+            <div class="path" id="casePath">—</div>
+          </div>
+          <button class="btn btn-secondary btn-icon" id="caseClose" type="button" aria-label="Close">×</button>
+        </div>
+        <div class="drawer-body" id="caseBody"></div>
+      </div>
+    </div>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>

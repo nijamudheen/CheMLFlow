@@ -1,0 +1,4 @@
+interface:
+  display_name: "CheMLFlow Run Monitor"
+  short_description: "Launch truthful live CheMLFlow dashboards"
+  default_prompt: "Use $chemlflow-run-monitor to launch or attach to this CheMLFlow run and verify dashboard state from artifacts."

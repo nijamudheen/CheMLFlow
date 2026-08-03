@@ -17,7 +17,7 @@ import yaml
 from utilities.config_validation import validate_config_strict
 
 
-CLASSIFICATION_ONLY_MODELS = {"catboost_classifier"}
+CLASSIFICATION_ONLY_MODELS = {"catboost_classifier", "tabpfn"}
 DL_PREFIX = "dl_"
 _DEDUPE_STRATEGY_ALIASES = {
     "keep_first": "first",
@@ -118,6 +118,7 @@ PROFILE_SPECS: dict[str, ProfileSpec] = {
             "featurize.rdkit",
             "featurize.morgan",
             "featurize.ecfp4_rdkit",
+            "featurize.chemeleon_fp",
         ),
         allowed_models=("random_forest", "svm", "decision_tree", "xgboost", "ensemble", "chemprop", "chemeleon", "dl_*"),
         supports_label_normalize=False,
@@ -138,6 +139,7 @@ PROFILE_SPECS: dict[str, ProfileSpec] = {
             "featurize.rdkit",
             "featurize.morgan",
             "featurize.ecfp4_rdkit",
+            "featurize.chemeleon_fp",
         ),
         allowed_models=("random_forest", "svm", "decision_tree", "xgboost", "ensemble", "chemprop", "chemeleon", "dl_*"),
         supports_label_normalize=False,
@@ -171,6 +173,7 @@ PROFILE_SPECS: dict[str, ProfileSpec] = {
             "featurize.rdkit",
             "featurize.morgan",
             "featurize.ecfp4_rdkit",
+            "featurize.chemeleon_fp",
         ),
         allowed_models=(
             "random_forest",
@@ -181,6 +184,7 @@ PROFILE_SPECS: dict[str, ProfileSpec] = {
             "catboost_classifier",
             "chemprop",
             "chemeleon",
+            "tabpfn",
             "dl_*",
         ),
         supports_label_normalize=True,
@@ -1625,6 +1629,7 @@ def _build_case_config(
         node in {
             "featurize.morgan",
             "featurize.ecfp4_rdkit",
+            "featurize.chemeleon_fp",
             "featurize.rdkit",
             "featurize.rdkit_labeled",
         }
@@ -1864,6 +1869,7 @@ def _validate_case(
         "featurize.rdkit_labeled",
         "featurize.morgan",
         "featurize.ecfp4_rdkit",
+        "featurize.chemeleon_fp",
     }
     preprocess_scaler = str(_get_dotted(config, "preprocess.scaler", "robust")).strip().lower() or "robust"
     selected_feature_input = _normalize_feature_input(
@@ -1871,6 +1877,8 @@ def _validate_case(
     ) or "none"
     if "featurize.none" in nodes or "use.curated_features" in nodes:
         selected_feature_input = "featurize.none"
+    elif "featurize.chemeleon_fp" in nodes:
+        selected_feature_input = "featurize.chemeleon_fp"
     elif "featurize.ecfp4_rdkit" in nodes:
         selected_feature_input = "featurize.ecfp4_rdkit"
     elif "featurize.rdkit" in nodes or "featurize.rdkit_labeled" in nodes:
@@ -1901,6 +1909,7 @@ def _validate_case(
                 message=(
                     "smiles_native is reserved for SMILES-native models (chemprop/chemeleon). "
                     "Use featurize.rdkit, featurize.morgan, featurize.ecfp4_rdkit, "
+                    "featurize.chemeleon_fp, "
                     "or featurize.none for tabular models."
                 ),
             )
@@ -1956,6 +1965,18 @@ def _validate_case(
                 code="DOE_CHEMELEON_CHECKPOINT_REQUIRED",
                 path="train.model.foundation_checkpoint",
                 message="CheMeleon runs require train.model.foundation_checkpoint to point to the .pt checkpoint.",
+            )
+    if "featurize.chemeleon_fp" in nodes:
+        checkpoint = str(_get_dotted(config, "featurize.checkpoint", "")).strip()
+        if not checkpoint:
+            _add_issue(
+                issues,
+                code="DOE_CHEMELEON_FP_CHECKPOINT_REQUIRED",
+                path="featurize.checkpoint",
+                message=(
+                    "featurize.chemeleon_fp requires featurize.checkpoint to point "
+                    "to the CheMeleon message-passing checkpoint."
+                ),
             )
     if profile.name == "reg_chembl_ic50" and "featurize.rdkit" not in nodes:
         _add_issue(

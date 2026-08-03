@@ -8,6 +8,8 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_absolute_error, r2_score
 
+from .progress import emit
+
 
 def train_chemprop_model(
     curated_df: pd.DataFrame,
@@ -17,6 +19,7 @@ def train_chemprop_model(
     random_state: int = 42,
     task_type: str = "classification",
     model_config: dict[str, Any] | None = None,
+    progress_reporter: Any | None = None,
     *,
     row_index_col: str,
     ensure_dir: Callable[[str], None],
@@ -109,7 +112,7 @@ def train_chemprop_model(
     import torch
     from lightning import pytorch as pl
     from lightning.pytorch import Trainer
-    from lightning.pytorch.callbacks import ModelCheckpoint
+    from lightning.pytorch.callbacks import Callback, ModelCheckpoint
 
     from chemprop import data, featurizers, models, nn
 
@@ -245,10 +248,59 @@ def train_chemprop_model(
         save_top_k=1,
         save_last=True,
     )
-    callbacks = [checkpointing]
-    if foundation_mode == "chemeleon" and freeze_encoder:
-        from lightning.pytorch.callbacks import Callback
+    class _ProgressCallback(Callback):
+        def on_train_start(self, trainer, pl_module) -> None:  # type: ignore[override]
+            _ = (trainer, pl_module)
+            emit(
+                progress_reporter,
+                "training_started",
+                "epoch",
+                unit="epoch",
+                total=max_epochs,
+                phase="training",
+                message="Chemprop Lightning training started.",
+            )
 
+        def on_validation_epoch_end(self, trainer, pl_module) -> None:  # type: ignore[override]
+            _ = pl_module
+            if getattr(trainer, "sanity_checking", False):
+                return
+            metrics: dict[str, Any] = {}
+            val_loss = dict(getattr(trainer, "callback_metrics", {}) or {}).get("val_loss")
+            if val_loss is not None:
+                metrics["val_loss"] = val_loss
+            emit(
+                progress_reporter,
+                "training_update",
+                "epoch",
+                current=int(getattr(trainer, "current_epoch", 0)) + 1,
+                total=max_epochs,
+                phase="validation",
+                message="Chemprop validation epoch complete.",
+                metrics=metrics,
+            )
+
+        def on_train_end(self, trainer, pl_module) -> None:  # type: ignore[override]
+            _ = (trainer, pl_module)
+            emit(
+                progress_reporter,
+                "training_scope_finished",
+                "epoch",
+                message="Chemprop Lightning training completed.",
+            )
+
+        def on_exception(self, trainer, pl_module, exception) -> None:  # type: ignore[override]
+            _ = (trainer, pl_module, exception)
+            emit(
+                progress_reporter,
+                "training_scope_finished",
+                "epoch",
+                status="failed",
+                message="Chemprop Lightning training failed.",
+            )
+
+    callbacks = [checkpointing, _ProgressCallback()]
+    if foundation_mode == "chemeleon" and freeze_encoder:
         class _FrozenEncoderEvalCallback(Callback):
             def on_train_epoch_start(self, trainer, pl_module) -> None:  # type: ignore[override]
                 for attr_name in ("message_passing", "mp", "encoder"):

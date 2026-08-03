@@ -10,6 +10,8 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_absolute_error, r2_score
 
+from .progress import emit, opaque_fit_finished, opaque_fit_started
+
 _PARENT_LEVEL_MODEL_SEARCH_MESSAGE = (
     "Runtime child-level hyperparameter search is disabled. Use DOE model_search "
     "to create parent-level fixed hyperparameter cases that fan out across CV folds."
@@ -35,6 +37,51 @@ def _predict_dl_with_batch(
     if supports_batch_size:
         return predict_dl(estimator, X, batch_size=batch_size)
     return predict_dl(estimator, X)
+
+
+def _train_dl_with_progress(
+    train_dl: Callable[..., dict[str, Any]],
+    *args: Any,
+    progress_reporter: Any | None,
+    **kwargs: Any,
+) -> dict[str, Any]:
+    """Pass telemetry only when an injected trainer accepts the new keyword."""
+
+    try:
+        signature = inspect.signature(train_dl)
+    except (TypeError, ValueError):
+        signature = None
+    if signature is not None:
+        parameters = signature.parameters.values()
+        if "progress_reporter" in signature.parameters or any(
+            parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters
+        ):
+            kwargs["progress_reporter"] = progress_reporter
+    return train_dl(*args, **kwargs)
+
+
+def _fit_with_opaque_progress(
+    estimator: Any,
+    X_train: pd.DataFrame,
+    y_train: pd.Series,
+    *,
+    model_type: str,
+    progress_reporter: Any | None,
+    fit_kwargs: dict[str, Any] | None = None,
+) -> None:
+    opaque_fit_started(progress_reporter, model_type)
+    try:
+        estimator.fit(X_train, y_train, **(fit_kwargs or {}))
+    except BaseException:
+        emit(
+            progress_reporter,
+            "training_scope_finished",
+            "fit",
+            status="failed",
+            message=f"{model_type} fit failed.",
+        )
+        raise
+    opaque_fit_finished(progress_reporter, model_type)
 
 
 def _deep_merge_dicts(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
@@ -223,6 +270,7 @@ def _fit_candidate_model(
     initialize_model: Callable[..., Any],
     seed_dl_runtime: Callable[[int], None],
     train_dl: Callable[..., dict[str, Any]],
+    progress_reporter: Any | None = None,
 ):
     if task_type == "classification" and model_type == "catboost_classifier":
         estimator = _build_catboost_classifier(
@@ -231,7 +279,14 @@ def _fit_candidate_model(
             model_params=params,
         )
         fit_kwargs = {"eval_set": (X_val, y_val), "use_best_model": True}
-        estimator.fit(X_train, y_train, **fit_kwargs)
+        _fit_with_opaque_progress(
+            estimator,
+            X_train,
+            y_train,
+            model_type=model_type,
+            progress_reporter=progress_reporter,
+            fit_kwargs=fit_kwargs,
+        )
         return estimator, params
 
     model = initialize_model(
@@ -249,7 +304,8 @@ def _fit_candidate_model(
         effective_params = {**model.default_params, **params}
         seed_dl_runtime(int(random_state))
         nn_model = model.model_class(effective_params)
-        result = train_dl(
+        result = _train_dl_with_progress(
+            train_dl,
             nn_model,
             X_train.values,
             y_train.values,
@@ -261,10 +317,17 @@ def _fit_candidate_model(
             patience=patience,
             random_state=random_state,
             task_type=task_type,
+            progress_reporter=progress_reporter,
         )
         return result["model"], {**effective_params, **result["best_params"]}
 
-    model.fit(X_train, y_train)
+    _fit_with_opaque_progress(
+        model,
+        X_train,
+        y_train,
+        model_type=model_type,
+        progress_reporter=progress_reporter,
+    )
     estimator = model.best_estimator_ if hasattr(model, "best_estimator_") else model
     best_params = model.best_params_ if hasattr(model, "best_params_") else params
     return estimator, best_params
@@ -336,6 +399,7 @@ def _run_runtime_optuna(
     predict_classification_outputs: Callable[..., tuple[np.ndarray, np.ndarray, np.ndarray]],
     classification_metrics_from_outputs: Callable[..., tuple[np.ndarray, np.ndarray, np.ndarray, dict[str, float | None]]],
     validate_regression_metric_inputs: Callable[..., tuple[np.ndarray, np.ndarray]],
+    progress_reporter: Any | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     try:
         import optuna
@@ -360,6 +424,16 @@ def _run_runtime_optuna(
         optuna.logging.set_verbosity(optuna.logging.WARNING)
     except Exception:
         pass
+
+    emit(
+        progress_reporter,
+        "training_started",
+        "trial",
+        unit="trial",
+        total=n_trials,
+        phase="hyperparameter_search",
+        message=f"Runtime Optuna search started for {model_type}.",
+    )
 
     def objective(trial: Any) -> float:
         sampled_params = _sampled_params_from_trial(trial, search_space)
@@ -390,6 +464,7 @@ def _run_runtime_optuna(
                 initialize_model=initialize_model,
                 seed_dl_runtime=seed_dl_runtime,
                 train_dl=train_dl,
+                progress_reporter=progress_reporter,
             )
             val_metrics = _score_candidate_on_validation(
                 estimator=estimator,
@@ -406,6 +481,15 @@ def _run_runtime_optuna(
             score = _runtime_metric_value(val_metrics, metric)
         except Exception as exc:
             logging.warning("Runtime Optuna trial failed during validation scoring: %s", exc)
+            emit(
+                progress_reporter,
+                "training_update",
+                "trial",
+                current=int(getattr(trial, "number", 0)) + 1,
+                total=n_trials,
+                phase="hyperparameter_search",
+                message=f"Optuna trial pruned: {exc}",
+            )
             raise optuna.exceptions.TrialPruned(str(exc)) from exc
         logging.info(
             "[optuna trial %d/%d] complete: validation %s=%.6f",
@@ -413,6 +497,16 @@ def _run_runtime_optuna(
             n_trials,
             metric,
             score,
+        )
+        emit(
+            progress_reporter,
+            "training_update",
+            "trial",
+            current=int(getattr(trial, "number", 0)) + 1,
+            total=n_trials,
+            phase="hyperparameter_search",
+            message=f"Optuna trial completed: {metric}={score:.6f}.",
+            metrics={metric: score},
         )
         return score
 
@@ -424,7 +518,23 @@ def _run_runtime_optuna(
         direction,
         sorted(search_space),
     )
-    study.optimize(objective, n_trials=n_trials)
+    try:
+        study.optimize(objective, n_trials=n_trials)
+    except BaseException:
+        emit(
+            progress_reporter,
+            "training_scope_finished",
+            "trial",
+            status="failed",
+            message=f"Runtime Optuna search failed for {model_type}.",
+        )
+        raise
+    emit(
+        progress_reporter,
+        "training_scope_finished",
+        "trial",
+        message=f"Runtime Optuna search completed for {model_type}.",
+    )
     try:
         best_trial = study.best_trial
         best_value = study.best_value
@@ -484,6 +594,7 @@ def train_model(
     model_config: dict[str, Any] | None = None,
     X_val: pd.DataFrame | None = None,
     y_val: pd.Series | None = None,
+    progress_reporter: Any | None = None,
     *,
     dl_search_config_cls: Any,
     train_result_cls: Callable[[str, str, str], Any],
@@ -580,6 +691,7 @@ def train_model(
             predict_classification_outputs=predict_classification_outputs,
             classification_metrics_from_outputs=classification_metrics_from_outputs,
             validate_regression_metric_inputs=validate_regression_metric_inputs,
+            progress_reporter=progress_reporter,
         )
         tuning_method = "fixed"
     elif tuning_method != "fixed":
@@ -601,7 +713,14 @@ def train_model(
         if eval_set:
             fit_kwargs["eval_set"] = eval_set
             fit_kwargs["use_best_model"] = True
-        estimator.fit(X_train, y_train, **fit_kwargs)
+        _fit_with_opaque_progress(
+            estimator,
+            X_train,
+            y_train,
+            model_type=model_type,
+            progress_reporter=progress_reporter,
+            fit_kwargs=fit_kwargs,
+        )
         y_pred_proba = estimator.predict_proba(X_test)[:, 1]
         y_pred = estimator.predict(X_test)
         model_path = os.path.join(output_dir, f"{model_type}_best_model.cbm")
@@ -684,6 +803,7 @@ def train_model(
         "xgboost",
         "svm",
         "ensemble",
+        "tabpfn",
     }
 
     if task_type == "classification" and not (model_type in classification_model_types or is_dl):
@@ -710,7 +830,8 @@ def train_model(
         logging.info("Training DL model: %s (fixed params)", model_type)
         seed_dl_runtime(int(random_state))
         nn_model = model.model_class(effective_params)
-        result = train_dl(
+        result = _train_dl_with_progress(
+            train_dl,
             nn_model,
             X_train.values,
             y_train.values,
@@ -722,6 +843,7 @@ def train_model(
             patience=patience,
             random_state=random_state,
             task_type=task_type,
+            progress_reporter=progress_reporter,
         )
         estimator = result["model"]
         best_params = {**effective_params, **result["best_params"]}
@@ -736,12 +858,22 @@ def train_model(
         )
     else:
         logging.info("Training ML model: %s", model_type)
-        model.fit(X_train, y_train)
+        _fit_with_opaque_progress(
+            model,
+            X_train,
+            y_train,
+            model_type=model_type,
+            progress_reporter=progress_reporter,
+        )
 
         estimator = model.best_estimator_ if hasattr(model, "best_estimator_") else model
         y_pred = estimator.predict(X_test)
-        model_path = os.path.join(output_dir, f"{model_type}_best_model.pkl")
-        save_model_pickle(estimator, model_path)
+        if model_type == "tabpfn":
+            model_path = os.path.join(output_dir, f"{model_type}_best_model.tabpfn_fit")
+            estimator.save_fit_state(model_path)
+        else:
+            model_path = os.path.join(output_dir, f"{model_type}_best_model.pkl")
+            save_model_pickle(estimator, model_path)
         best_params = model.best_params_ if hasattr(model, "best_params_") else {}
         if optuna_summary is not None:
             best_params = model_params if not best_params else _deep_merge_dicts(model_params, best_params)

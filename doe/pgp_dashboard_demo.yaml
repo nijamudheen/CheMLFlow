@@ -1,0 +1,83 @@
+version: 1
+
+# Compact, presentation-friendly DOE for the tracked Broccatelli P-glycoprotein
+# inhibitor dataset. Three model families share one sampled dataset and one
+# three-fold split protocol. Invalid model/input pairings remain in the DOE
+# manifest as compatibility skips; they are not execution failures.
+dataset:
+  profile: clf_local_csv
+  name: pgp_broccatelli_dashboard_demo
+  task_type: classification
+  target_column: Activity
+  source:
+    type: local_csv
+    path: tutorials/data/pgp_broccatelli.csv
+  smiles_column: SMILES
+  sample:
+    fraction: 0.25
+    seed: 42
+    strategy: stratified
+
+defaults:
+  global.base_dir: artifacts/data/pgp_dashboard_demo
+  global.random_state: 42
+  global.runs.enabled: true
+  global.artifact_retention: full
+  split.mode: cv
+  split.strategy: random
+  split.cv.n_splits: 3
+  split.cv.repeats: 1
+  split.val_from_train.val_size: 0.15
+  split.require_disjoint: true
+  split.require_full_test_coverage: true
+  pipeline.preprocess: false
+  pipeline.select: false
+  pipeline.explain: false
+  preprocess.scaler: none
+  train.tuning.method: fixed
+  train.early_stopping.patience: 5
+  train.reporting.plot_split_performance: true
+
+search_space:
+  pipeline.feature_input: [featurize.morgan, smiles_native]
+  train.model.type: [random_forest, dl_simple, chemprop]
+
+# One fixed, lightweight parameter point per model keeps the demo scientific
+# comparison simple while making epoch telemetry visible for both DL stacks.
+model_search:
+  random_forest:
+    method: grid
+    params:
+      n_estimators: [120]
+      max_depth: [12]
+  dl_simple:
+    method: grid
+    params:
+      epochs: [20]
+      batch_size: [32]
+      learning_rate: [0.001]
+      hidden_dim: [128]
+  chemprop:
+    method: grid
+    params:
+      max_epochs: [12]
+      batch_size: [64]
+      max_lr: [0.001]
+
+constraints:
+  isolate_case_artifacts: true
+  max_cases: 18
+  allowed_combinations:
+    - pipeline.feature_input: featurize.morgan
+      train.model.type: random_forest
+    - pipeline.feature_input: featurize.morgan
+      train.model.type: dl_simple
+    - pipeline.feature_input: smiles_native
+      train.model.type: chemprop
+
+selection:
+  primary_metric: auc
+  optimize: max
+
+output:
+  dir: config/generated/pgp_dashboard_demo

@@ -1,6 +1,6 @@
 ---
 name: chemlflow-study-runner
-description: Coordinate end-to-end CheMLFlow studies across dataset profiling, runtime config design, DOE generation, local or Slurm execution, analysis, and audit. Use when a user asks an agent to run or improve a CheMLFlow experiment workflow rather than only build one config, review one DOE, or audit one analysis bundle.
+description: Coordinate end-to-end CheMLFlow studies across conversational research intake, dataset profiling, runtime config design, DOE generation, local or Slurm execution, analysis, and audit. Use when a user asks to train or build a model for a dataset, asks how to conduct a CheMLFlow study, or asks an agent to run or improve an experiment workflow rather than only build one config, review one DOE, or audit one analysis bundle.
 ---
 
 # CheMLFlow Study Runner
@@ -34,7 +34,9 @@ Use this as the master CheMLFlow operating skill. It routes agents to the focuse
 
 1. For one runtime config, use `skills/chemlflow-config-builder`.
 2. For a comparison, benchmark, or K-fold result, use `skills/chemlflow-doe-designer`.
-3. For local execution, use `scripts/run_doe_local.py`.
+3. For monitored local execution or read-only attachment, use
+   `skills/chemlflow-run-monitor`; for non-dashboard local execution, use
+   `scripts/run_doe_local.py` directly.
 4. For Slurm execution, use the repo's Slurm submit/orchestration workflow when present.
 5. For local analysis, use `analysis.py --backend local`.
 6. For Slurm analysis, use `analysis.py --backend slurm` with the orchestrator job/log inputs.
@@ -42,6 +44,77 @@ Use this as the master CheMLFlow operating skill. It routes agents to the focuse
 8. For explicitly requested optional molecular EDA or selected molecular
    publication figures, use `skills/chemlflow-molecular-analysis` outside DOE
    child fanout.
+
+## Research Intake and Approval Gate
+
+Treat a request such as "I want to train a model for this dataset" as the start
+of an agent-guided study, not as permission to launch compute immediately.
+
+1. Inspect and profile the named dataset first. State facts that CheMLFlow can
+   discover, including the likely target, task type, molecular input column,
+   row count, label balance or target distribution, source-supplied train/test
+   or external-validation groups, likely leakage columns, and obvious
+   data-quality findings. Do not ask the user to rediscover those facts.
+2. For a new study described by a short or underspecified prompt, ask at least
+   five material study-design questions before choosing one config or a DOE.
+   Ask concise questions in one batch or at most two short rounds. Include a
+   recommended answer and a one-sentence tradeoff for each, and let the user
+   answer "accept the recommendations." Do not repeat choices already supplied
+   by the user; confirm them and ask another unresolved material question when
+   needed.
+3. Cover these five decision areas at minimum:
+   - **Endpoint meaning:** Confirm that the discovered target is the intended
+     outcome and ask what its values mean scientifically. For the tracked PGP
+     data, identify `Activity` yourself and ask the user to confirm its meaning;
+     do not ask them which column contains activity.
+   - **Curation policy:** Ask how ambiguous measurements, missing values,
+     duplicate molecules, and conflicting labels should be handled when the
+     profile shows they are relevant.
+   - **Generalization test:** Ask whether evaluation should represent random
+     interpolation, unseen chemical scaffolds, temporal prediction, grouped
+     sources, or another intended deployment boundary. When the dataset already
+     marks training and external-validation rows, explicitly ask whether to
+     preserve that partition and recommend keeping it untouched unless the user
+     gives a scientific reason not to.
+   - **Model scope:** Ask whether to establish a compact baseline or compare
+     compatible tabular, PyTorch, and SMILES-native model families. Explicitly
+     address Chemprop/CheMeleon when SMILES are available.
+   - **Success criteria:** Ask for the primary metric or the scientific error
+     tradeoff that should determine selection, and recommend a metric based on
+     task type and class balance. Recommend only metrics supported by the
+     current CheMLFlow selection contract: `auc`, `auprc`, `accuracy`, or `f1`
+     for classification and `r2` or `mae` for regression. Describe unsupported
+     metrics as possible future work, not as executable plan fields.
+4. Ask validation-depth questions such as CV versus an untouched holdout when
+   the answers above do not settle them. Do not promise calibration,
+   uncertainty, interpretability, or another analysis until current CheMLFlow
+   support has been verified; otherwise label it outside the present study.
+   Invite a short sentence of study context when it would improve a
+   recommendation, but do not use a vague "what is your research objective?"
+   prompt as a substitute for a concrete design question.
+5. Do not ask for compute or time budget during the initial five-question
+   intake. After the scientific plan and generated run shape are known, report
+   the expected workload and runtime environment. Ask about compute only if it
+   then changes execution strategy or requires local-versus-Slurm direction.
+6. After the answers, present one proposed study contract: dataset and endpoint,
+   curation, split/validation protocol, model and representation scope, primary
+   metric, whether the result is one config or a DOE, expected parent/execution
+   counts, known compatibility skips, assumptions, and material limitations.
+7. Prepare but do not execute the study. Generate the config or DOE, start the
+   dashboard in attach-only mode, verify that planned valid cases are queued,
+   and give the user the URL plus exact run shape. Do not start training yet.
+8. Ask one explicit final approval question that states what will run. Treat an
+   affirmative response such as "start," "run it," or "go ahead" as approval
+   for the described pilot-to-full workflow. If the plan changes materially
+   after approval, stop and request approval for the revised plan.
+9. After approval, launch through `skills/chemlflow-run-monitor`, keep the same
+   dashboard attached, run and audit the pilot, continue the approved study
+   when the pilot gate passes, analyze and curate final results, and report
+   failures or stale cases from artifacts rather than hiding them.
+
+Use the combined dashboard `run` command only when the study has already been
+approved or the user explicitly asks to bypass the queued preview. Otherwise,
+generate first, attach read-only for approval, and start execution separately.
 
 ## Default Study Flow
 

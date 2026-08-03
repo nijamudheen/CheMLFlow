@@ -340,6 +340,10 @@ different primary metric.
   `pipeline.feature_input: featurize.morgan`.
 - `chemprop` and `chemeleon` default to `pipeline.feature_input: smiles_native`
   when that axis is omitted.
+- `tabpfn` is classification-only and accepts explicit tabular representations,
+  including `featurize.rdkit` and `featurize.chemeleon_fp`.
+- The tracked `doe/pgp_tabpfn_foundation_demo.yaml` keeps the model fixed at
+  TabPFN 2.6 and varies only RDKit2D versus CheMeleonFP across three CV folds.
 - `reg_chembl_ic50` defaults `global.target_column` to `pIC50`.
 - For comparisons across pipelines, strongly consider
   `split.require_disjoint: true` and `split.require_full_test_coverage: true`.

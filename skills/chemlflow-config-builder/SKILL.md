@@ -15,6 +15,19 @@ column does not by itself justify adding `analyze.molecular_eda` or
 analysis request and follow `skills/chemlflow-molecular-analysis`. Prefer a
 separate dataset-analysis config over extending a modelling config.
 
+This skill covers tabular and molecular runtime configs (`global.pipeline_type`
+unset, or `train`/`train.tdc` terminal nodes). For a raw time-series
+forecasting request (chaotic dynamical systems, sensor/measurement series,
+Adaptive NVAR or Connectome NVAR), do not force curation/featurization/split
+nodes onto it — that pipeline uses `global.pipeline_type: timeseries`, a
+`train.timeseries` terminal node, and a `split:` block with `warmup_len` /
+`train_len` / `val_len` / `test_len` instead of `test_size`. Follow
+`docs/timeseries_pipeline.md` and `config/timeseries_quick_demo.yaml` instead
+of this skill's workflow. Note: in-repo experiments found Adam-only training
+outperforms two-phase Adam → L-BFGS for Adaptive NVAR, so leave
+`num_epochs_lbfgs: 0` unless the user wants to reproduce the original
+two-phase protocol.
+
 ## Workflow
 
 1. Find nearby examples before inventing a pattern. Prefer `config/config*.yaml`, `tutorials/**/configs/*.yaml`, `config/doe_*.yaml`, `docs/config-options.md`, and existing `run_config.yaml` artifacts. For SMILES-native configs, search existing files for `smiles_native`, `chemprop`, `chemeleon`, `foundation`, and `foundation_checkpoint`.
@@ -116,3 +129,4 @@ After download, set `train.model.foundation_checkpoint: models/chemeleon_mp.pt`.
 - `docs/config-options.md` for runtime config schema and node rules.
 - `references/config-examples.md` for canonical submitted single-config examples covering regression/classification by Chemprop, CheMeleon, random forest, and ensemble.
 - `tutorials/01_single_config_colab/configs/pgp_svm_cv_fold0.yaml` for a tracked minimal single-config tutorial example.
+- `docs/timeseries_pipeline.md` and `config/timeseries_quick_demo.yaml` for the separate time-series (Adaptive NVAR / Connectome NVAR) pipeline, out of scope for this skill.

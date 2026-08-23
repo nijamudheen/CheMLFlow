@@ -9,6 +9,8 @@ description: Design and review CheMLFlow DOE YAMLs and generated DOE artifacts. 
 
 Use this skill as a small operating manual for CheMLFlow DOE work. Keep the focus on experiment validity: compatible axes, predictable manifest shape, auditable configs, and scientifically meaningful split/evaluation design.
 
+This skill's checks (feature/model compatibility, `smiles_native`, Chemprop/CheMeleon) assume a tabular or molecular DOE. For a time-series DOE (profile `ts_forecast`, models `dl_adaptive_nvar` / `dl_connectome_nvar`), those checks do not apply: use `config/doe_timeseries.yaml` as the reference shape, put architecture/optimization axes (`k`, `hidden_dim`, `lr_adam`, `lr_lbfgs`, `n_connectome`, ...) in `model_search` per `docs/timeseries_pipeline.md`, and note that in-repo experiments found Adam-only training (`num_epochs_lbfgs: 0`) outperforms two-phase Adam → L-BFGS, so don't add an `lr_lbfgs`/`num_epochs_lbfgs` search axis unless the user explicitly wants to compare against L-BFGS refinement.
+
 ## Workflow
 
 1. Locate the DOE spec, usually `config/doe_*.yaml`, `doe/doe_*.yaml`, or a user-provided YAML.
@@ -116,3 +118,4 @@ python analysis.py --backend local --doe-dir config/generated/example_doe --outp
 
 - For detailed review prompts and expected red flags, read `references/doe-review.md`.
 - For canonical repo docs, prefer `docs/doe.md`, `docs/doe_quickstart.md`, and `docs/dataset_profile_support_matrix.md`.
+- For time-series DOEs, prefer `docs/timeseries_pipeline.md` and `docs/timeseries_changelog.md` over the tabular-focused references above.

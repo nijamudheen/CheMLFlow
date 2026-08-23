@@ -1,0 +1,52 @@
+global:
+  pipeline_type: timeseries
+  task_type: regression
+  base_dir: artifacts/data/ts_quick_demo
+  run_dir: artifacts/runs/ts_quick_demo
+  target_column: x
+  random_state: 2025
+  thresholds:
+    active: 1000
+    inactive: 10000
+  artifact_retention: full
+
+pipeline:
+  nodes:
+    - get_data
+    - train.timeseries
+  feature_input: none
+
+get_data:
+  data_source: local_npy
+  source:
+    path: data/ground_truth.npy
+    time_axis: cols
+
+split:
+  warmup_len: 500
+  train_len: 7500
+  val_len: 1000
+  test_len: 1000
+
+train:
+  tuning:
+    method: fixed
+  model:
+    type: dl_adaptive_nvar
+    params:
+      k: 5
+      hidden_dim: 50
+      lr_adam: 1.0e-3
+      max_epochs_adam: 30
+      adam_patience: 10
+      lr_lbfgs: 1.0
+      num_epochs_lbfgs: 0  # L-BFGS refinement disabled; Adam-only performed better in our experiments
+      lbfgs_patience: 5
+      lbfgs_max_iter: 10
+      weight_decay: 0.0
+      train_noise_scale: 0.0
+      dataset_noise_scale: 0.10
+      horizons: [25, 50, 75, 100]
+      num_windows: 10
+      test_num_runs: 1
+      selection_segment: val

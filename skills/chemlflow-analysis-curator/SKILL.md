@@ -9,6 +9,16 @@ description: Audit and curate CheMLFlow analysis outputs. Use when Codex is aske
 
 Use this skill to prove a CheMLFlow analysis result is complete, balanced, and interpretable. The core habit is to compare manifest counts, job state counts, raw execution rows, aggregated parent rows, and feature/scaler/model/split distributions before trusting metrics.
 
+For time-series runs (`dl_adaptive_nvar` / `dl_connectome_nvar`), the
+Morgan/RDKit/ECFP4+RDKit/`scaler`/`smiles_native` checks below don't apply —
+there is no featurization or scaler axis. `analysis.py` discovers
+`<model_type>_metrics.json` and its `split_metrics_path` directly; see
+`docs/timeseries_pipeline.md` ("Compatibility") for what those files contain.
+When curating a time-series sweep, also check `selection_segment` (should be
+`val`, not `test`, when ranking search candidates) and note whether
+`num_epochs_lbfgs` was left at `0` (recommended) or re-enabled for an
+intentional Adam-vs-L-BFGS comparison.
+
 ## Workflow
 
 1. Locate the analysis directory containing `report.json`, `all_runs_metrics.csv`, and `all_runs_metrics_by_execution.csv`.

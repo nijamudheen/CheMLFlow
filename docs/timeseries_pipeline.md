@@ -56,11 +56,11 @@ artifacts/runs/ts_quick_demo/
   run_config.yaml, run_status.json, run.log
 ```
 
-For the full notebook-quality config (5000 Adam + 50000 L-BFGS epochs):
-
-```bash
-CHEMLFLOW_CONFIG=config/timeseries_mg_demo.yaml python main.py
-```
+`config/timeseries_quick_demo.yaml` ships with `num_epochs_lbfgs: 0` — in our
+experiments Adam-only training outperformed the two-phase Adam → L-BFGS
+protocol, so **L-BFGS refinement is disabled by default and we recommend
+leaving it off.** Set `num_epochs_lbfgs` back to a positive value only if you
+want to reproduce the original notebook's two-phase behavior for comparison.
 
 ### 3. Connectome NVAR
 
@@ -92,15 +92,14 @@ train:
 
 ### 4. DOE sweeps
 
-Two DOE specs ship with this branch:
-
 ```bash
 # AdaptiveNVAR sweep (parent-level Optuna model_search)
 python scripts/generate_doe.py --doe config/doe_timeseries.yaml
-
-# ConnectomeNVAR sweep (parent-level Optuna model_search + connectome axes)
-python scripts/generate_doe.py --doe config/doe_timeseries_connectome.yaml
 ```
+
+For ConnectomeNVAR sweeps, write a DOE spec with `model_search` covering the
+connectome axes (`n_connectome`, `connectome_mode`, `connectome_selection_mode`,
+etc.) following the same shape as `config/doe_timeseries.yaml`.
 
 Then dispatch the generated `case_*.yaml` configs through `main.py` however
 your environment runs them.

@@ -54,6 +54,14 @@ The required inputs are:
 
 Downstream steps enforce only the minimum required columns for their node (e.g., `canonical_smiles` for RDKit, `target_column` for model training), and extra columns are allowed.
 
+### Time-series forecasting (Adaptive NVAR / Connectome NVAR)
+
+Alongside the tabular/SMILES pipeline above, CheMLFlow also has a separate
+`pipeline_type: timeseries` profile for chaotic dynamical-system forecasting,
+using Adaptive NVAR and Adaptive Connectome NVAR models. See
+[`docs/timeseries_pipeline.md`](docs/timeseries_pipeline.md) for the schema
+and quickstart, and try it with `config/timeseries_quick_demo.yaml`.
+
 ### SMILES handling
 
 - Raw SMILES strings are **never** used directly as numeric features. Use a featurizer to convert SMILES to numeric descriptors or fingerprints.

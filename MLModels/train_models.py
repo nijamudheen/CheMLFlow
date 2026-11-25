@@ -334,6 +334,7 @@ def _train_dl(
     patience: int,
     random_state: int = 42,
     task_type: str = "regression",
+    device: str = "auto",
     ) -> Dict[str, Any]:
     return training_torch_models.train_dl(
         model=model,
@@ -347,6 +348,7 @@ def _train_dl(
         patience=patience,
         random_state=random_state,
         task_type=task_type,
+        device=device,
     )
 
 def _predict_dl(model, X: np.ndarray, batch_size: int = 64) -> np.ndarray:

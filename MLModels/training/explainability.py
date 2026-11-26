@@ -10,6 +10,8 @@ import pandas as pd
 from sklearn.inspection import permutation_importance
 from sklearn.metrics import accuracy_score, r2_score
 
+from MLModels.training.torch_models import model_device
+
 
 def run_explainability(
     estimator: object,
@@ -182,8 +184,9 @@ def run_explainability(
             X_test = X_explain
 
         elif model_type.startswith("dl_"):
-            device = get_device()
-            estimator.to(device).eval()
+            # Explain on the device the model was trained on; `get_device` is no longer used here.
+            device = model_device(estimator)
+            estimator.eval()
 
             n_bg = min(background_samples, len(X_train))
             n_ex = min(100, len(X_test))

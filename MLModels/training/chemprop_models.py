@@ -8,6 +8,8 @@ import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_absolute_error, r2_score
 
+from MLModels.training.torch_models import normalize_device, resolve_device
+
 
 def train_chemprop_model(
     curated_df: pd.DataFrame,
@@ -83,6 +85,7 @@ def train_chemprop_model(
     df["_label"] = y_all.reset_index(drop=True)
 
     params = dict(model_config.get("params", {}))
+    device_setting = normalize_device(params.get("device", "auto"))
     batch_size = int(params.get("batch_size", 64))
     max_epochs = int(params.get("max_epochs", 30))
     max_lr = float(params.get("max_lr", params.get("lr", 1e-3)))
@@ -257,13 +260,15 @@ def train_chemprop_model(
                         module.eval()
 
         callbacks.append(_FrozenEncoderEvalCallback())
+    # Same resolver as the tabular models, so `auto`/`cuda`/`mps`/`cpu` mean the same here.
+    resolved_device = resolve_device(device_setting)
     trainer = Trainer(
         max_epochs=max_epochs,
         logger=False,
         enable_checkpointing=True,
         enable_progress_bar=False,
         deterministic=True,
-        accelerator="auto",
+        accelerator=resolved_device.type,
         devices=1,
         callbacks=callbacks,
     )
@@ -313,6 +318,7 @@ def train_chemprop_model(
     preds = _predict_values(test_loader, context="chemprop test scoring")
 
     metrics = {
+        "device": str(resolved_device),
         "max_epochs": int(max_epochs),
         "batch_size": int(batch_size),
         "init_lr": float(init_lr),

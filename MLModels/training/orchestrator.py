@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import inspect
 import json
 import logging
@@ -9,6 +10,8 @@ from typing import Any, Callable
 import numpy as np
 import pandas as pd
 from sklearn.metrics import mean_absolute_error, r2_score
+
+from MLModels.training.torch_models import normalize_device, release_accelerator_memory
 
 _PARENT_LEVEL_MODEL_SEARCH_MESSAGE = (
     "Runtime child-level hyperparameter search is disabled. Use DOE model_search "
@@ -174,8 +177,25 @@ def _trial_rows(study: Any) -> list[dict[str, Any]]:
         }
         for key, value in dict(getattr(trial, "params", {}) or {}).items():
             row[f"param_{key}"] = value
+        failure_reason = dict(getattr(trial, "user_attrs", {}) or {}).get("failure_reason")
+        if failure_reason:
+            row["failure_reason"] = failure_reason
         rows.append(row)
     return rows
+
+
+def _is_out_of_memory(exc: BaseException) -> bool:
+    """True for CUDA/MPS out-of-memory errors (matched by message, so torch is not imported)."""
+    return "out of memory" in str(exc).lower()
+
+
+def _failure_counts(study: Any) -> dict[str, int]:
+    counts = {"out_of_memory": 0, "error": 0}
+    for trial in getattr(study, "trials", []):
+        reason = dict(getattr(trial, "user_attrs", {}) or {}).get("failure_reason")
+        if reason in counts:
+            counts[reason] += 1
+    return counts
 
 
 def _build_catboost_classifier(
@@ -362,6 +382,9 @@ def _run_runtime_optuna(
         pass
 
     def objective(trial: Any) -> float:
+        if is_dl:
+            # Free what earlier trials left behind before this one allocates.
+            release_accelerator_memory()
         sampled_params = _sampled_params_from_trial(trial, search_space)
         candidate_params = _deep_merge_dicts(base_model_params, sampled_params)
         logging.info(
@@ -370,6 +393,8 @@ def _run_runtime_optuna(
             n_trials,
             sampled_params,
         )
+        failure: str | None = None
+        out_of_memory = False
         try:
             estimator, selected_params = _fit_candidate_model(
                 model_type=model_type,
@@ -405,8 +430,24 @@ def _run_runtime_optuna(
             )
             score = _runtime_metric_value(val_metrics, metric)
         except Exception as exc:
-            logging.warning("Runtime Optuna trial failed during validation scoring: %s", exc)
-            raise optuna.exceptions.TrialPruned(str(exc)) from exc
+            failure = str(exc)
+            out_of_memory = _is_out_of_memory(exc)
+        if failure is not None:
+            # Raised outside the except block so the failed trial's tensors are
+            # not kept alive by the exception chain.
+            reason = "out_of_memory" if out_of_memory else "error"
+            trial.set_user_attr("failure_reason", reason)
+            if out_of_memory:
+                logging.warning(
+                    "[optuna trial %d/%d] pruned: out of memory with params=%s: %s",
+                    int(getattr(trial, "number", 0)) + 1,
+                    n_trials,
+                    sampled_params,
+                    failure,
+                )
+            else:
+                logging.warning("Runtime Optuna trial failed during validation scoring: %s", failure)
+            raise optuna.exceptions.TrialPruned(failure)
         logging.info(
             "[optuna trial %d/%d] complete: validation %s=%.6f",
             int(getattr(trial, "number", 0)) + 1,
@@ -425,11 +466,24 @@ def _run_runtime_optuna(
         sorted(search_space),
     )
     study.optimize(objective, n_trials=n_trials)
+    failure_counts = _failure_counts(study)
     try:
         best_trial = study.best_trial
         best_value = study.best_value
     except ValueError:
-        raise ValueError(f"Runtime Optuna search for {model_type} produced no valid trials.")
+        raise ValueError(
+            f"Runtime Optuna search for {model_type} produced no valid trials "
+            f"({failure_counts['out_of_memory']} ran out of memory, "
+            f"{failure_counts['error']} failed with other errors)."
+        )
+    if failure_counts["out_of_memory"]:
+        logging.warning(
+            "Runtime Optuna for %s: %d of %d trials were pruned because they ran out of memory; "
+            "the search is biased toward smaller configurations.",
+            model_type,
+            failure_counts["out_of_memory"],
+            n_trials,
+        )
 
     trial_rows = _trial_rows(study)
     trials_path = os.path.join(output_dir, f"{model_type}_optuna_trials.csv")
@@ -451,6 +505,8 @@ def _run_runtime_optuna(
         "best_value": float(best_value),
         "best_params": best_params,
         "best_sampled_params": best_sampled,
+        "n_trials_pruned_out_of_memory": failure_counts["out_of_memory"],
+        "n_trials_pruned_error": failure_counts["error"],
         "trials_path": trials_path,
     }
     summary_path = os.path.join(output_dir, f"{model_type}_optuna_summary.json")
@@ -520,6 +576,13 @@ def train_model(
     tuning_method = runtime_options.tuning_method
     tuning_cfg = runtime_options.tuning_config
     model_params = runtime_options.model_params
+    if is_dl:
+        # `device` is a runtime setting, not a hyperparameter: keep it out of the
+        # model builder, Optuna and the saved best params.
+        model_params = dict(model_params)
+        dl_device = normalize_device(model_params.pop("device", "auto"))
+        train_dl = functools.partial(train_dl, device=dl_device)
+    trained_device: str | None = None
     if use_hpo:
         raise ValueError(_PARENT_LEVEL_MODEL_SEARCH_MESSAGE)
     optuna_summary: dict[str, Any] | None = None
@@ -725,6 +788,7 @@ def train_model(
         )
         estimator = result["model"]
         best_params = {**effective_params, **result["best_params"]}
+        trained_device = result.get("device")
 
         model_path = os.path.join(output_dir, f"{model_type}_best_model.pth")
         dl_batch_size = max(1, int(best_params.get("batch_size", 64)))
@@ -783,6 +847,8 @@ def train_model(
         }
     if feature_name_map_path:
         metrics["feature_name_map_path"] = feature_name_map_path
+    if trained_device:
+        metrics["device"] = trained_device
     if optuna_summary is not None:
         metrics["tuning"] = optuna_summary
 

@@ -48,6 +48,11 @@ import joblib
 import numpy as np
 
 from utilities import connectome_loader, timeseries_io
+from MLModels.training.torch_models import (
+    log_device_diagnostics,
+    normalize_device,
+    resolve_device,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -105,11 +110,12 @@ class TrainingConfig:
     selection_segment: str = "val"    # "val", "test", or "auto"
 
     # Device selection. Values:
-    #   "auto" - use CUDA if torch.cuda.is_available(), else CPU. No raise.
+    #   "auto" - CUDA if available, else MPS, else CPU. No raise.
     #   "cuda" - REQUIRE CUDA. Raise RuntimeError if torch.cuda.is_available()
     #            is False or device_count is 0. This is the recommended HPCC
     #            setting: it converts silent CPU fallback (which can waste
     #            hours of wall-clock) into a fast, loud failure.
+    #   "mps"  - REQUIRE Apple MPS. Raise if unavailable.
     #   "cpu"  - force CPU even if CUDA is available. Useful for debugging.
     device: str = "auto"
 
@@ -144,16 +150,10 @@ def parse_training_config(
     # base_seed comes from global random_state unless explicitly overridden.
     cfg.base_seed = int(model_params.get("base_seed", global_random_state))
 
-    # Device knob. Accepts "auto"|"cuda"|"cpu" (case-insensitive). Anything
+    # Device knob. Accepts "auto"|"cuda"|"cpu"|"mps" (case-insensitive). Anything
     # else is rejected loudly so a typo in YAML doesn't silently fall back.
     if "device" in model_params:
-        dev = str(model_params["device"]).strip().lower()
-        if dev not in {"auto", "cuda", "mps", "cpu"}:
-            raise ValueError(
-                f"train.model.params.device must be one of "
-                f"'auto', 'cuda', 'cpu'; got {model_params['device']!r}."
-            )
-        cfg.device = dev
+        cfg.device = normalize_device(model_params["device"])
 
     # Architectural ----------------------------------------------------------
     if "k" in model_params:
@@ -273,7 +273,7 @@ def _seed_everything(seed: int) -> None:
 # Device selection (strict + diagnostic)
 # ---------------------------------------------------------------------------
 #
-# `train.model.params.device` (auto|cuda|cpu) controls how the trainer selects
+# `train.model.params.device` (auto|cuda|cpu|mps) controls how the trainer selects
 # a torch device. The default `auto` matches the older behavior; `cuda` is
 # strict — it raises if CUDA isn't actually available, converting a silent
 # 5-hour-on-CPU surprise into a fast, loud failure. The first call also
@@ -285,81 +285,10 @@ def _seed_everything(seed: int) -> None:
 # device-selection decision, even in standalone (non-CheMLFlow-pipeline)
 # uses of train_timeseries_nvar.
 
-_DEVICE_DIAGNOSTIC_EMITTED = False
-
-
-def _log_device_diagnostics(requested: str, resolved) -> None:
-    """One-shot dump of torch CUDA visibility info. Fires once per process."""
-    global _DEVICE_DIAGNOSTIC_EMITTED
-    if _DEVICE_DIAGNOSTIC_EMITTED:
-        return
-    _DEVICE_DIAGNOSTIC_EMITTED = True
-
-    import torch
-
-    LOGGER.info("=" * 60)
-    LOGGER.info("Device diagnostic (emitted once per process):")
-    LOGGER.info("  torch.__version__         = %s", torch.__version__)
-    LOGGER.info("  torch.version.cuda        = %s", getattr(torch.version, "cuda", None))
-    LOGGER.info("  torch.cuda.is_available() = %s", torch.cuda.is_available())
-    try:
-        LOGGER.info("  torch.cuda.device_count() = %d", torch.cuda.device_count())
-    except Exception as exc:
-        LOGGER.info("  torch.cuda.device_count() raised: %s", exc)
-    LOGGER.info(
-        "  CUDA_VISIBLE_DEVICES env  = %s",
-        os.environ.get("CUDA_VISIBLE_DEVICES", "<unset>"),
-    )
-    LOGGER.info("  requested device          = %s", requested)
-    LOGGER.info("  resolved device           = %s", resolved)
-    LOGGER.info("=" * 60)
-
-
-def _resolve_device(requested: str):
-    """Return a torch.device honoring `requested` (auto|cuda|cpu).
-
-    - "cuda": requires torch.cuda.is_available() and device_count >= 1, else raises.
-    - "cpu":  always returns torch.device("cpu").
-    - "auto": CUDA if available, else CPU. No raise.
-
-    Also emits a one-time process-wide diagnostic via _log_device_diagnostics.
-    """
-    import torch
-
-    req = str(requested or "auto").strip().lower()
-    if req == "cpu":
-        device = torch.device("cpu")
-    elif req == "cuda":
-        if not torch.cuda.is_available() or torch.cuda.device_count() < 1:
-            _log_device_diagnostics(req, "REQUESTED CUDA BUT UNAVAILABLE")
-            raise RuntimeError(
-                "train.model.params.device='cuda' was requested but no CUDA "
-                "device is visible to PyTorch. See the device diagnostic "
-                "above. Common causes: (1) PyTorch was installed without "
-                "CUDA support — `python -c 'import torch; print(torch.version.cuda)'` "
-                "shows None; (2) Slurm did not allocate a GPU — `nvidia-smi` "
-                "shows no devices, or CUDA_VISIBLE_DEVICES is empty; (3) the "
-                "job ran on a CPU-only node. Re-submit with --gpus=1 and a "
-                "CUDA-enabled PyTorch in the env, or set device: cpu/auto to "
-                "fall back."
-            )
-        device = torch.device("cuda")
-    elif req == "mps":
-        if not torch.backends.mps.is_available():
-            raise RuntimeError("train.model.params.device='mps' was requested but MPS is unavailable.")
-        device = torch.device("mps")
-    elif req == "auto":
-        if torch.cuda.is_available():
-            device = torch.device("cuda")
-        elif torch.backends.mps.is_available():
-            device = torch.device("mps")
-        else:
-            device = torch.device("cpu")
-    else:  # pragma: no cover - parse_training_config already validates
-        raise ValueError(f"unknown device {requested!r}")
-
-    _log_device_diagnostics(req, device)
-    return device
+# The resolver lives in torch_models so tabular, Chemprop and time-series
+# models share one implementation; these aliases keep the old names.
+_log_device_diagnostics = log_device_diagnostics
+_resolve_device = resolve_device
 
 
 # ---------------------------------------------------------------------------

@@ -44,7 +44,7 @@ def test_train_model_dl_fixed_respects_model_params(monkeypatch, tmp_path) -> No
     monkeypatch.setattr(train_models, "_seed_dl_runtime", lambda _seed: None)
     fake_torch = types.SimpleNamespace(
         save=lambda obj, path: saved_tensors.__setitem__(str(path), obj),
-        load=lambda path, weights_only=True: saved_tensors[str(path)],
+        load=lambda path, map_location=None, weights_only=True: saved_tensors[str(path)],
     )
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
 
@@ -60,8 +60,9 @@ def test_train_model_dl_fixed_respects_model_params(monkeypatch, tmp_path) -> No
         patience,
         random_state,
         task_type,
+        device="auto",
     ):
-        _ = (X_train, y_train, X_val, y_val, patience, random_state, task_type)
+        _ = (X_train, y_train, X_val, y_val, patience, random_state, task_type, device)
         captured["model_params"] = dict(model.params)
         captured["epochs"] = int(epochs)
         captured["batch_size"] = int(batch_size)

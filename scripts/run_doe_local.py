@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
 import subprocess
 import sys
 import time
@@ -97,7 +98,34 @@ def _build_parser() -> argparse.ArgumentParser:
             "global.base_dir. By default this is refused for --max-workers > 1."
         ),
     )
+    parser.add_argument(
+        "--gpus",
+        default="",
+        help=(
+            "Comma-separated GPU ids, e.g. 0,1. Each running case gets one of them as its "
+            "CUDA_VISIBLE_DEVICES, so cases never pile onto the same card. Ids are used "
+            "literally (under Slurm, pass the ids the job was given). Choosing the GPU is "
+            "the launcher's job: configs should set train.model.params.device to auto or "
+            "cuda, never a GPU index. Default: do not touch CUDA_VISIBLE_DEVICES. To force "
+            "CPU for every case, launch with CUDA_VISIBLE_DEVICES= instead."
+        ),
+    )
+    parser.add_argument(
+        "--workers-per-gpu",
+        type=int,
+        default=1,
+        help=(
+            "How many cases may share one GPU at a time (requires --gpus). "
+            "--max-workers must not exceed len(--gpus) * --workers-per-gpu. Default: 1."
+        ),
+    )
     return parser
+
+
+def _gpu_slots(gpus_arg: str, workers_per_gpu: int) -> list[str]:
+    """One entry per concurrent GPU slot, interleaved across cards (0,1,0,1,...)."""
+    gpus = [g.strip() for g in str(gpus_arg).split(",") if g.strip()]
+    return [gpu for _ in range(max(1, int(workers_per_gpu))) for gpu in gpus]
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -236,6 +264,7 @@ def _run_one(
     main_path: Path,
     resume: bool,
     dry_run: bool,
+    gpu_slots: "queue.Queue[str] | None" = None,
 ) -> dict[str, Any]:
     config_path = _resolve_config_path(str(record.get("config_path", "")), doe_dir=doe_dir)
     run_dir = _run_dir_for_config(config_path)
@@ -280,16 +309,24 @@ def _run_one(
         log_fh.write(f"[local-doe] start={start_time}\n")
         log_fh.write(f"[local-doe] config={config_path}\n")
         log_fh.write(f"[local-doe] run_dir={run_dir or ''}\n")
+        gpu = gpu_slots.get() if gpu_slots is not None else None
+        if gpu is not None:
+            env["CUDA_VISIBLE_DEVICES"] = gpu
+            log_fh.write(f"[local-doe] cuda_visible_devices={gpu}\n")
         log_fh.flush()
-        completed = subprocess.run(
-            [python_bin, str(main_path)],
-            cwd=str(REPO_ROOT),
-            env=env,
-            stdout=log_fh,
-            stderr=subprocess.STDOUT,
-            text=True,
-            check=False,
-        )
+        try:
+            completed = subprocess.run(
+                [python_bin, str(main_path)],
+                cwd=str(REPO_ROOT),
+                env=env,
+                stdout=log_fh,
+                stderr=subprocess.STDOUT,
+                text=True,
+                check=False,
+            )
+        finally:
+            if gpu is not None:
+                gpu_slots.put(gpu)
         end_time = _utc_now()
         log_fh.write(f"\n[local-doe] end={end_time}\n")
         log_fh.write(f"[local-doe] return_code={completed.returncode}\n")
@@ -366,6 +403,28 @@ def main(argv: list[str] | None = None) -> int:
 
     logs_dir.mkdir(parents=True, exist_ok=True)
     max_workers = max(1, int(args.max_workers))
+    gpu_slots: "queue.Queue[str] | None" = None
+    if int(args.workers_per_gpu) < 1:
+        print("[local-doe] --workers-per-gpu must be >= 1.", file=sys.stderr)
+        return 2
+    if str(args.gpus).strip():
+        slots = _gpu_slots(args.gpus, args.workers_per_gpu)
+        if not slots:
+            print(f"[local-doe] --gpus has no GPU ids: {args.gpus!r}", file=sys.stderr)
+            return 2
+        if max_workers > len(slots):
+            print(
+                f"[local-doe] refusing --max-workers {max_workers} with only {len(slots)} GPU "
+                "slot(s) (len(--gpus) * --workers-per-gpu). Lower --max-workers or add slots.",
+                file=sys.stderr,
+            )
+            return 2
+        gpu_slots = queue.Queue()
+        for slot in slots:
+            gpu_slots.put(slot)
+    elif int(args.workers_per_gpu) != 1:
+        print("[local-doe] --workers-per-gpu requires --gpus.", file=sys.stderr)
+        return 2
     if max_workers > 1 and args.stop_on_failure:
         print(
             "[local-doe] refusing --max-workers > 1 with --stop-on-failure because "
@@ -400,6 +459,7 @@ def main(argv: list[str] | None = None) -> int:
                 main_path=main_path,
                 resume=bool(args.resume),
                 dry_run=bool(args.dry_run),
+                gpu_slots=gpu_slots,
             )
             results.append(result)
             _write_jsonl(output_manifest, results)
@@ -427,6 +487,7 @@ def main(argv: list[str] | None = None) -> int:
                     main_path=main_path,
                     resume=bool(args.resume),
                     dry_run=bool(args.dry_run),
+                    gpu_slots=gpu_slots,
                 ): sequence
                 for sequence, record in enumerate(records, start=1)
             }

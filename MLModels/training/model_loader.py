@@ -38,7 +38,8 @@ def load_model(
         model_params = {**config.default_params, **saved_params}
 
         model = config.model_class(model_params)
-        model.load_state_dict(torch.load(model_path, weights_only=True))
+        # map_location="cpu": GPU-trained files load on CPU-only machines; predictions run on CPU.
+        model.load_state_dict(torch.load(model_path, map_location="cpu", weights_only=True))
         model.eval()
         return model
     if model_type == "catboost_classifier":

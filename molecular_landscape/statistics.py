@@ -112,12 +112,12 @@ def kruskal_across_groups(
         if k < 2 or total <= k:
             continue
         result = stats.kruskal(*samples)
-        # Tomczak & Tomczak epsilon-squared, bounded [0, 1].
-        epsilon_sq = float((result.statistic - k + 1) / (total - k))
+        # Tomczak & Tomczak (2014) epsilon-squared: H / ((n^2 - 1) / (n + 1)) = H / (n - 1).
+        epsilon_sq = float(result.statistic / (total - 1))
         rows.append({
             "descriptor": descriptor, "n": total, "n_groups": k,
             "kruskal_h": float(result.statistic), "p": float(result.pvalue),
-            "epsilon_squared": max(0.0, epsilon_sq),
+            "epsilon_squared": min(1.0, max(0.0, epsilon_sq)),
         })
     out = pd.DataFrame(rows)
     if not out.empty:

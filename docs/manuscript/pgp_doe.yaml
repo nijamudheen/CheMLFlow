@@ -1,0 +1,57 @@
+version: 1
+dataset:
+  profile: clf_local_csv
+  name: pgp_classification
+  task_type: classification
+  target_column: Activity
+  source:
+    type: local_csv
+    path: local_data/pgp_broccatelli.csv
+  smiles_column: SMILES
+defaults:
+  global.base_dir: /mnt/home/output_pgp_doe_20260501/data
+  global.random_state: 42
+  global.runs.enabled: true
+  split.mode: cv
+  split.cv.n_splits: 5
+  split.cv.repeats: 1
+  split.val_from_train.val_size: 0.1
+  split.require_disjoint: true
+  split.require_full_test_coverage: true
+  pipeline.preprocess: true
+  preprocess.variance_threshold: 0.0
+  preprocess.corr_threshold: 1.0
+  train.model.foundation_checkpoint: /mnt/home/models/chemeleon_mp.pt
+  train.tuning.method: fixed
+  train.reporting.plot_split_performance: true
+  global.run_dir: /mnt/home/output_pgp_doe_20260501/runs
+search_space:
+  preprocess.scaler:
+  - none
+  - standard
+  - minmax
+  split.strategy:
+  - random
+  - scaffold
+  pipeline.feature_input:
+  - smiles_native
+  - featurize.rdkit
+  - featurize.morgan
+  train.model.type:
+  - random_forest
+  - svm
+  - decision_tree
+  - xgboost
+  - ensemble
+  - chemprop
+  - chemeleon
+  - dl_simple
+  - dl_deep
+  - dl_gru
+  - dl_resmlp
+  - dl_tabtransformer
+  - dl_aereg
+output:
+  dir: /mnt/home/pgp_doe_20260501
+constraints:
+  isolate_case_artifacts: true

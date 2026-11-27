@@ -1,0 +1,94 @@
+version: 1
+
+# This is the only scientific study definition. CheMLFlow expands it into:
+#   2 feature inputs x 2 split strategies = 4 scientific parents
+#   4 parents x 5 CV folds = 20 execution-child runtime configs
+dataset:
+  profile: reg_chembl_ic50
+  name: CHEMBL275_direct_chembl_ensemble_cv
+  task_type: regression
+  target_column: pIC50
+  source:
+    type: chembl
+    target_chembl_id: CHEMBL275
+  curate:
+    properties:
+      - standard_value
+    smiles_column: canonical_smiles
+    # Conservatively remove molecules that have conflicting replicate IC50s.
+    dedupe_strategy: drop_conflicts
+    label_column: standard_value
+    keep_all_columns: true
+    drop_missing_smiles: true
+    drop_invalid_smiles: true
+    drop_missing_target: true
+    required_non_null_columns:
+      - canonical_smiles
+      - standard_value
+      - standard_units
+      - standard_relation
+      - standard_type
+      - target_chembl_id
+    row_filters:
+      target_chembl_id:
+        - CHEMBL275
+      standard_type:
+        - IC50
+      standard_units:
+        - nM
+      standard_relation:
+        - "="
+
+defaults:
+  global.base_dir: ../CHEMBL275/artifacts/CHEMBL275_direct_chembl_ensemble_cv
+  global.random_state: 42
+  global.runs.enabled: true
+
+  # Curation standardizes to sanitized canonical SMILES and keeps the largest
+  # valid fragment. Charged compounds are retained.
+  curate.prefer_largest_fragment: true
+  curate.require_neutral_charge: false
+
+  # Omitting fold_index and repeat_index tells CheMLFlow to generate every
+  # fold/repeat child automatically.
+  split.mode: cv
+  split.cv.n_splits: 5
+  split.cv.repeats: 1
+  split.cv.random_state: 42
+  split.val_from_train.val_size: 0.1
+  split.val_from_train.stratify: false
+  split.stratify: false
+  split.require_disjoint: true
+  split.require_full_test_coverage: true
+
+  pipeline.preprocess: false
+  pipeline.select: false
+  # RDKit branches use SHAP when available. CheMLFlow writes an explanation
+  # skip marker for Morgan branches.
+  pipeline.explain: true
+  pipeline.analyze_stats: false
+  pipeline.analyze_eda: false
+
+  train.model.type: ensemble
+  train.model.n_jobs: -1
+  train.tuning.method: fixed
+  train.reporting.plot_split_performance: true
+
+search_space:
+  pipeline.feature_input:
+    - featurize.morgan
+    - featurize.rdkit
+  split.strategy:
+    - random
+    - scaffold
+
+constraints:
+  isolate_case_artifacts: true
+  max_cases: 20
+
+selection:
+  primary_metric: r2
+  optimize: max
+
+output:
+  dir: ../CHEMBL275/generated/CHEMBL275_direct_chembl_ensemble_cv

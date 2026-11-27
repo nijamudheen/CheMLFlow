@@ -1,0 +1,91 @@
+version: 1
+
+dataset:
+  profile: reg_local_csv_ic50
+  name: CHEMBL203
+  task_type: regression
+  target_column: pIC50
+  smiles_column: canonical_smiles
+  source:
+    type: local_csv
+    path: CHEMBL203/chembl203_ic50_raw.csv
+  curate:
+    properties: standard_value
+    smiles_column: canonical_smiles
+    dedupe_strategy: first
+    drop_missing_smiles: true
+    drop_invalid_smiles: true
+    drop_missing_target: true
+    prefer_largest_fragment: true
+    keep_all_columns: true
+    required_non_null_columns:
+      - standard_value
+      - standard_type
+      - standard_units
+      - standard_relation
+      - target_chembl_id
+    row_filters:
+      target_chembl_id:
+        - CHEMBL203
+      standard_type:
+        - IC50
+      standard_units:
+        - nM
+      standard_relation:
+        - "="
+
+defaults:
+  global.pipeline_type: chembl
+  global.base_dir: CHEMBL203/data_rf
+  global.random_state: 42
+  global.runs.enabled: true
+  global.artifact_retention: full
+
+  split.mode: cv
+  split.strategy: random
+  split.random_state: 42
+  split.cv.n_splits: 5
+  split.cv.repeats: 1
+  split.cv.random_state: 42
+  split.val_from_train.val_size: 0.1
+  split.val_from_train.stratify: false
+  split.require_disjoint: true
+  split.require_full_test_coverage: true
+
+  pipeline.feature_input: featurize.rdkit
+  pipeline.preprocess: true
+  pipeline.select: false
+  pipeline.explain: false
+  pipeline.analyze_stats: false
+  pipeline.analyze_eda: false
+
+  preprocess.scaler: none
+  preprocess.variance_threshold: 0.0
+  preprocess.corr_threshold: 0.95
+
+  train.tuning.method: fixed
+  train.model.n_jobs: 1
+  train.reporting.plot_split_performance: true
+
+search_space:
+  pipeline.feature_input:
+    - featurize.rdkit
+    - featurize.morgan
+  preprocess.scaler:
+    - none
+  train.model.type:
+    - random_forest
+  split.strategy:
+    - random
+    - scaffold
+
+constraints:
+  isolate_case_artifacts: true
+  max_cases: 20
+
+selection:
+  primary_metric: r2
+  optimize: max
+
+output:
+  dir: /Users/CHEMBL203/generated_rf
